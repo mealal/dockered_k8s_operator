@@ -342,7 +342,6 @@ DNS.1 = {self.config.hostname}
 DNS.2 = localhost
 DNS.3 = ops-manager
 DNS.4 = host.docker.internal
-IP.1 = 127.0.0.1
 """
         san_config.write_text(san_config_content)
 
@@ -367,7 +366,6 @@ DNS.1 = {self.config.hostname}
 DNS.2 = localhost
 DNS.3 = ops-manager
 DNS.4 = host.docker.internal
-IP.1 = 127.0.0.1
 """
         ext_file.write_text(ext_content)
 

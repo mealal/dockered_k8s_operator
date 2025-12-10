@@ -157,12 +157,13 @@ class YAMLTemplateManager:
         return output_path
 
     def render_configmap(self, namespace: str, base_url: str, project_name: str,
-                         org_id: str) -> Path:
+                         org_id: str, ssl_require_valid_certs: bool = True) -> Path:
         """Render ops-manager-configmap.yaml with connection details."""
         variables = {
             "BASE_URL": base_url,
             "PROJECT_NAME": project_name,
             "ORG_ID": org_id,
+            "SSL_REQUIRE_VALID_CERTS": "true" if ssl_require_valid_certs else "false",
         }
 
         template_path = self.template_dir / "ops-manager-configmap.yaml"
@@ -173,6 +174,16 @@ class YAMLTemplateManager:
 
         # Update namespace (template default is mongodb-rs)
         content = re.sub(r'namespace: mongodb-rs', f'namespace: {namespace}', content)
+
+        # When SSL verification is disabled, remove the CA ConfigMap reference
+        # This prevents the operator from mounting the CA cert and forcing verification
+        if not ssl_require_valid_certs:
+            # Remove the sslMMSCAConfigMap line and its comments
+            content = re.sub(
+                r'\n\s*#[^\n]*CA certificate[^\n]*\n\s*#[^\n]*\n\s*#[^\n]*\n\s*sslMMSCAConfigMap:[^\n]*',
+                '',
+                content
+            )
 
         output_path = self.generated_dir / "ops-manager-configmap.yaml"
         output_path.write_text(content, encoding='utf-8')
@@ -202,7 +213,7 @@ class YAMLTemplateManager:
 
     def render_replicaset(self, namespace: str, rs_name: str, members: int,
                           version: str, cpu_request: str, memory_request: str,
-                          storage_size: str) -> Path:
+                          storage_size: str, tls_require_valid_certs: bool = True) -> Path:
         """Render mongodb-replicaset.yaml with replica set configuration."""
         variables = {
             "REPLICA_SET_NAME": rs_name,
@@ -211,6 +222,8 @@ class YAMLTemplateManager:
             "CPU_REQUEST": cpu_request,
             "MEMORY_REQUEST": memory_request,
             "STORAGE_SIZE": storage_size,
+            "TLS_REQUIRE_VALID_CERTS": "true" if tls_require_valid_certs else "false",
+            "SSL_REQUIRE_VALID_MMS_CERTS": "true" if tls_require_valid_certs else "false",
         }
 
         template_path = self.template_dir / "mongodb-replicaset.yaml"
@@ -425,6 +438,7 @@ class ClusterConfig:
     worker_nodes: int = 1
     ops_manager_url: str = "https://host.docker.internal:8443"
     kubeconfig_dir: str = "./.kube"
+    ssl_skip_verify: bool = False            # Skip TLS cert validation for Ops Manager
 
     @property
     def namespace(self) -> str:
@@ -898,7 +912,8 @@ class MongoDBOperatorDeployer:
             namespace=rs_namespace,
             base_url=self.cluster_config.ops_manager_url,
             project_name=self.credentials.project_name,
-            org_id=self.credentials.org_id
+            org_id=self.credentials.org_id,
+            ssl_require_valid_certs=not self.cluster_config.ssl_skip_verify
         )
 
         logger.info(f"Generated configmap YAML: {yaml_path}")
@@ -1084,9 +1099,13 @@ subjects:
             ("Creating operator RBAC for RS namespace", self.deploy_operator_rbac_for_rs_namespace),
             ("Deploying database roles in RS namespace", self.deploy_database_roles),
             ("Creating Ops Manager secret", self.create_ops_manager_secret),
-            ("Creating Ops Manager CA ConfigMap", self.create_ops_manager_ca_configmap),
-            ("Creating Ops Manager ConfigMap", self.create_ops_manager_configmap),
         ]
+
+        # Only create CA ConfigMap if SSL verification is enabled
+        if not self.cluster_config.ssl_skip_verify:
+            steps.append(("Creating Ops Manager CA ConfigMap", self.create_ops_manager_ca_configmap))
+
+        steps.append(("Creating Ops Manager ConfigMap", self.create_ops_manager_configmap))
 
         for step_name, step_func in steps:
             logger.info(f"Step: {step_name}")
@@ -1132,7 +1151,8 @@ class MongoDBReplicaSetDeployer:
             version=self.rs_config.version,
             cpu_request=self.rs_config.cpu_request,
             memory_request=self.rs_config.memory_request,
-            storage_size=self.rs_config.storage_size
+            storage_size=self.rs_config.storage_size,
+            tls_require_valid_certs=not self.cluster_config.ssl_skip_verify
         )
 
         logger.info(f"Generated replica set YAML: {yaml_path}")
@@ -1270,6 +1290,8 @@ All tools (kind, kubectl) run via Docker - no local installation required!
                           help="Path to Ops Manager API key file")
     om_group.add_argument("--ops-manager-url", default="https://host.docker.internal:8443",
                           help="Ops Manager URL (from inside kind cluster)")
+    om_group.add_argument("--ssl-skip-verify", action="store_true",
+                          help="Skip TLS certificate validation for Ops Manager (INSECURE - testing only)")
 
     # Replica set options
     rs_group = parser.add_argument_group("Replica Set Options")
@@ -1308,7 +1330,8 @@ All tools (kind, kubectl) run via Docker - no local installation required!
         rs_namespace=args.rs_namespace,
         worker_nodes=args.worker_nodes,
         ops_manager_url=args.ops_manager_url,
-        kubeconfig_dir=args.kubeconfig_dir
+        kubeconfig_dir=args.kubeconfig_dir,
+        ssl_skip_verify=args.ssl_skip_verify
     )
 
     rs_config = ReplicaSetConfig(

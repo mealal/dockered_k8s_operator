@@ -69,6 +69,19 @@ spec:
   credentials: ops-manager-admin-key
 
   # -----------------------------------------------------------------------------
+  # Agent Configuration
+  # -----------------------------------------------------------------------------
+
+  # MongoDB Agent startup options
+  # These settings configure how the automation agent connects to Ops Manager
+  agent:
+    startupOptions:
+      # Skip TLS certificate validation for Ops Manager connection
+      # WARNING: Only set to "false" for testing - never in production!
+      # When "false", connections are susceptible to man-in-the-middle attacks
+      tlsRequireValidMMSServerCertificates: "{{TLS_REQUIRE_VALID_CERTS}}"
+
+  # -----------------------------------------------------------------------------
   # Storage Configuration
   # -----------------------------------------------------------------------------
 
@@ -86,6 +99,12 @@ spec:
         # Container configuration for the MongoDB database container
         containers:
           - name: mongodb-enterprise-database
+            # Environment variables for the database container
+            env:
+              # Controls TLS certificate validation for agent download from Ops Manager
+              # Set to "false" to skip validation (INSECURE - testing only)
+              - name: SSL_REQUIRE_VALID_MMS_CERTIFICATES
+                value: "{{SSL_REQUIRE_VALID_MMS_CERTS}}"
             # Resource requests and limits
             # Adjust based on your workload requirements
             resources:

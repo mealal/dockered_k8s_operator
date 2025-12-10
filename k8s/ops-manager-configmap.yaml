@@ -52,3 +52,9 @@ data:
   # This is used when Ops Manager uses a self-signed or private CA certificate
   # The referenced ConfigMap must have a key named 'mms-ca.crt'
   sslMMSCAConfigMap: "ops-manager-ca"
+
+  # Skip TLS certificate validation for Ops Manager connection
+  # Set to 'false' to allow connections with invalid/mismatched certificates
+  # WARNING: Only use 'false' for testing - never in production!
+  # Default is 'true' which requires valid certificates
+  sslRequireValidMMSServerCertificates: "{{SSL_REQUIRE_VALID_CERTS}}"
