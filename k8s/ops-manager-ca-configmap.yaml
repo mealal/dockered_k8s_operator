@@ -1,0 +1,42 @@
+# =============================================================================
+# Ops Manager CA Certificate ConfigMap
+# =============================================================================
+#
+# This ConfigMap contains the CA certificate that the MongoDB automation
+# agents use to verify the Ops Manager TLS certificate.
+#
+# IMPORTANT:
+#   - This file is a template. The actual CA certificate is populated by
+#     the deploy_mongodb_k8s.py script from ./certs/ca.crt
+#   - The key MUST be named 'mms-ca.crt' - this is required by the operator
+#
+# For manual deployment:
+#   1. Ensure you have your CA certificate file (e.g., ca.crt)
+#   2. Replace the placeholder certificate below with your actual CA cert
+#   3. Make sure to preserve the YAML multi-line format (|)
+#
+# Alternatively, create this ConfigMap from a file:
+#   kubectl create configmap ops-manager-ca \
+#     --from-file=mms-ca.crt=./certs/ca.crt \
+#     -n mongodb
+#
+# Apply with: kubectl apply -f ops-manager-ca-configmap.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # ConfigMap name - must match 'sslMMSCAConfigMap' in ops-manager-connection ConfigMap
+  name: ops-manager-ca
+  # Deploy to the replica set namespace where MongoDB pods run
+  namespace: mongodb-rs
+  labels:
+    app.kubernetes.io/name: ops-manager-ca
+    app.kubernetes.io/component: ops-manager-ca
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s
+data:
+  # CA Certificate for Ops Manager TLS verification
+  # IMPORTANT: The key MUST be 'mms-ca.crt' - the operator expects this exact name
+  # Replace the placeholder below with your actual CA certificate in PEM format
+  mms-ca.crt: |
+    {{CA_CERTIFICATE}}

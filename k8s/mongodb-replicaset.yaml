@@ -1,0 +1,135 @@
+# =============================================================================
+# MongoDB ReplicaSet Deployment
+# =============================================================================
+#
+# This file defines a MongoDB ReplicaSet managed by the MongoDB Enterprise
+# Kubernetes Operator. The operator will:
+#   1. Register this deployment with Ops Manager (into the EXISTING project)
+#   2. Deploy MongoDB automation agents in each pod
+#   3. Configure and manage the replica set through Ops Manager
+#
+# IMPORTANT: This file is a template. Some values are populated by
+# the deploy_mongodb_k8s.py script. For manual deployment, review and
+# update the configuration values below.
+#
+# Prerequisites:
+#   1. MongoDB Enterprise Kubernetes Operator installed (in 'mongodb' namespace)
+#   2. Ops Manager credentials secret created (ops-manager-admin-key)
+#   3. Ops Manager connection ConfigMap created (ops-manager-connection)
+#   4. Ops Manager CA ConfigMap created (ops-manager-ca)
+#
+# Apply with: kubectl apply -f mongodb-replicaset.yaml
+#
+# Monitor deployment:
+#   kubectl get mongodb -n mongodb-rs -w
+#   kubectl describe mongodb mongodb-rs -n mongodb-rs
+# =============================================================================
+
+apiVersion: mongodb.com/v1
+kind: MongoDB
+metadata:
+  # Name of the MongoDB resource - this will be the replica set name
+  name: {{REPLICA_SET_NAME}}
+  # Deploy to the replica set namespace (separate from operator namespace)
+  namespace: mongodb-rs
+  labels:
+    app.kubernetes.io/name: mongodb
+    app.kubernetes.io/component: database
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s
+spec:
+  # -----------------------------------------------------------------------------
+  # Replica Set Configuration
+  # -----------------------------------------------------------------------------
+
+  # Number of replica set members (minimum 3 for production)
+  # Odd numbers recommended for proper election majority
+  members: {{MEMBERS}}
+
+  # MongoDB version to deploy
+  # Must be available in Ops Manager (either downloaded or via Hybrid Mode)
+  # Format: "X.Y.Z-ent" for Enterprise edition
+  # Default: 7.0.25-ent
+  version: "{{VERSION}}"
+
+  # Deployment type: ReplicaSet, ShardedCluster, or Standalone
+  type: ReplicaSet
+
+  # -----------------------------------------------------------------------------
+  # Ops Manager Connection
+  # -----------------------------------------------------------------------------
+
+  # Reference to the ConfigMap containing Ops Manager connection details
+  # The ConfigMap specifies the existing project ID where the cluster will be deployed
+  opsManager:
+    configMapRef:
+      name: ops-manager-connection
+
+  # Name of the Secret containing Ops Manager API credentials
+  # This secret must have 'publicKey' and 'privateKey' fields
+  credentials: ops-manager-admin-key
+
+  # -----------------------------------------------------------------------------
+  # Storage Configuration
+  # -----------------------------------------------------------------------------
+
+  # Enable persistent storage (recommended for production)
+  # When true, PersistentVolumeClaims will be created for data storage
+  persistent: true
+
+  # -----------------------------------------------------------------------------
+  # Pod Configuration
+  # -----------------------------------------------------------------------------
+
+  podSpec:
+    podTemplate:
+      spec:
+        # Container configuration for the MongoDB database container
+        containers:
+          - name: mongodb-enterprise-database
+            # Resource requests and limits
+            # Adjust based on your workload requirements
+            resources:
+              requests:
+                # Minimum CPU allocation
+                cpu: "{{CPU_REQUEST}}"
+                # Minimum memory allocation
+                memory: "{{MEMORY_REQUEST}}"
+              limits:
+                # Maximum CPU allocation
+                cpu: "1"
+                # Maximum memory allocation
+                memory: "2Gi"
+
+    # Persistent storage configuration
+    persistence:
+      single:
+        # Storage size for each replica set member
+        # This creates a PVC of the specified size for data storage
+        storage: "{{STORAGE_SIZE}}"
+
+  # -----------------------------------------------------------------------------
+  # Optional: Additional Configuration
+  # -----------------------------------------------------------------------------
+
+  # Uncomment and configure these sections as needed:
+
+  # # Authentication configuration
+  # security:
+  #   authentication:
+  #     enabled: true
+  #     modes:
+  #       - SCRAM
+
+  # # TLS/SSL configuration for MongoDB connections
+  # security:
+  #   tls:
+  #     enabled: true
+  #     # secretRef:
+  #     #   name: mongodb-tls-cert
+
+  # # Custom MongoDB configuration options
+  # additionalMongodConfig:
+  #   storage:
+  #     wiredTiger:
+  #       engineConfig:
+  #         cacheSizeGB: 1

@@ -1,0 +1,27 @@
+# =============================================================================
+# MongoDB ReplicaSet Namespace
+# =============================================================================
+#
+# This namespace is used for MongoDB ReplicaSet deployments.
+# Separating the replica set from the operator provides:
+#   - Better resource isolation
+#   - Independent resource quotas
+#   - Cleaner RBAC policies
+#   - Easier management and monitoring
+#
+# The MongoDB Enterprise Kubernetes Operator (in the 'mongodb' namespace)
+# will watch this namespace for MongoDB custom resources.
+#
+# Apply with: kubectl apply -f mongodb-rs-namespace.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  # Name of the namespace for MongoDB replica sets
+  name: mongodb-rs
+  labels:
+    # Labels for identification and filtering
+    app.kubernetes.io/name: mongodb-replicaset
+    app.kubernetes.io/component: database-namespace
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s

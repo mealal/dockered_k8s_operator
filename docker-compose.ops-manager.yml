@@ -1,0 +1,62 @@
+version: '3.8'
+
+# MongoDB Ops Manager with HTTPS Docker Compose
+# Use with: docker-compose -f docker-compose.ops-manager.yml up -d
+#
+# Prerequisites:
+# 1. Generate certificates first using: python deploy_ops_manager.py --certs-only
+# 2. Then run: docker-compose -f docker-compose.ops-manager.yml up -d
+
+services:
+  # Application Database for Ops Manager
+  ops-manager-appdb:
+    image: mongo:6.0
+    container_name: ops-manager-appdb
+    networks:
+      - ops-manager-network
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password
+    volumes:
+      - ops-manager-appdb-data:/data/db
+    command: ["--bind_ip_all"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # MongoDB Ops Manager with HTTPS
+  ops-manager:
+    image: mongodb/mongodb-enterprise-ops-manager:7.0
+    container_name: ops-manager
+    networks:
+      - ops-manager-network
+    ports:
+      - "8443:8443"
+    depends_on:
+      ops-manager-appdb:
+        condition: service_healthy
+    environment:
+      - HTTPS_PORT=8443
+      - MMS_HTTPS_PEM_KEY_FILE=/etc/mongodb-mms/certs/server.pem
+      - MMS_HTTPS_CA_FILE=/etc/mongodb-mms/certs/ca.crt
+    volumes:
+      - ./certs:/etc/mongodb-mms/certs:ro
+      - ./config:/etc/mongodb-mms/conf:ro
+      - ops-manager-data:/mongodb-mms
+    healthcheck:
+      test: ["CMD", "curl", "-k", "-f", "https://localhost:8443/"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+networks:
+  ops-manager-network:
+    driver: bridge
+
+volumes:
+  ops-manager-appdb-data:
+  ops-manager-data:

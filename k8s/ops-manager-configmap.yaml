@@ -1,0 +1,54 @@
+# =============================================================================
+# Ops Manager Connection ConfigMap
+# =============================================================================
+#
+# This ConfigMap contains the connection details for MongoDB Ops Manager.
+# The MongoDB Enterprise Kubernetes Operator uses these values to connect
+# to Ops Manager and register/manage MongoDB deployments.
+#
+# IMPORTANT: This file is a template. The actual values are populated by
+# the deploy_mongodb_k8s.py script from ops-manager-api-key.json.
+#
+# For manual deployment, replace the placeholder values:
+#   - baseUrl: Your Ops Manager URL (HTTPS required for production)
+#   - projectId: Your Ops Manager Project ID (to use existing project)
+#   - orgId: Your Ops Manager Organization ID
+#
+# Note: Use 'projectId' to deploy to an EXISTING project by ID.
+#       Use 'projectName' to create a NEW project by name (not recommended).
+#
+# Apply with: kubectl apply -f ops-manager-configmap.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # ConfigMap name - referenced by MongoDB resources via 'opsManager.configMapRef'
+  name: ops-manager-connection
+  # Deploy to the replica set namespace where MongoDB pods run
+  namespace: mongodb-rs
+  labels:
+    app.kubernetes.io/name: ops-manager-connection
+    app.kubernetes.io/component: ops-manager-connection
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s
+data:
+  # Ops Manager Base URL
+  # For local development with kind: "https://host.docker.internal:8443"
+  # For production: "https://your-ops-manager.example.com:8443"
+  # Note: Use host.docker.internal to access host machine from kind cluster
+  baseUrl: "{{BASE_URL}}"
+
+  # Ops Manager Project Name
+  # The operator will deploy to an existing project with this name, or create a new one
+  # Find project name in Ops Manager: Settings > Project Settings > Project Name
+  # Note: Use the actual project NAME, not the project ID
+  projectName: "{{PROJECT_NAME}}"
+
+  # Ops Manager Organization ID
+  # Find this in Ops Manager: Settings > Organization Settings > Organization ID
+  orgId: "{{ORG_ID}}"
+
+  # Name of the ConfigMap containing the CA certificate for Ops Manager
+  # This is used when Ops Manager uses a self-signed or private CA certificate
+  # The referenced ConfigMap must have a key named 'mms-ca.crt'
+  sslMMSCAConfigMap: "ops-manager-ca"

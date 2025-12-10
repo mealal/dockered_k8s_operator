@@ -1,0 +1,23 @@
+# =============================================================================
+# MongoDB Kubernetes Operator Namespace
+# =============================================================================
+#
+# This namespace is used for the MongoDB Enterprise Kubernetes Operator.
+# The operator watches all namespaces (or specific ones) for MongoDB resources.
+#
+# Note: MongoDB replica sets should be deployed in a separate namespace
+# (e.g., mongodb-rs) for better isolation and resource management.
+#
+# Apply with: kubectl apply -f namespace.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  # Name of the namespace for the operator
+  name: mongodb
+  labels:
+    # Labels for identification and filtering
+    app.kubernetes.io/name: mongodb-operator
+    app.kubernetes.io/component: operator-namespace
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s
