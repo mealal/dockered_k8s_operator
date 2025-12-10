@@ -4,6 +4,19 @@ This document describes how to bypass SSL certificate verification when deployin
 
 > **WARNING**: Disabling SSL certificate verification is **INSECURE** and should **NEVER** be used in production. It makes connections susceptible to man-in-the-middle attacks.
 
+## Platform-Specific IP Addresses
+
+When connecting to Ops Manager from inside a kind cluster, the IP address depends on your platform:
+
+| Platform | IP Address | Hostname Alternative |
+|----------|------------|---------------------|
+| macOS (Docker Desktop) | `192.168.65.254` | `host.docker.internal` |
+| Windows (Docker Desktop) | `192.168.65.254` | `host.docker.internal` |
+| Linux (Docker) | `172.17.0.1` | Configure `host.docker.internal` in `/etc/hosts` |
+
+> **Recommendation**: Use `host.docker.internal` when possible as it works across platforms.
+> The deployment script defaults to `https://host.docker.internal:8443`.
+
 ## Problem Description
 
 When deploying MongoDB to Kubernetes with the Enterprise Operator connecting to Ops Manager over HTTPS, you may encounter certificate validation errors such as:
@@ -164,11 +177,14 @@ When set to `"false"`, the script uses `curl -k` (insecure) to download the agen
 The `deploy_mongodb_k8s.py` script supports a `--ssl-skip-verify` flag that configures all three settings automatically:
 
 ```bash
-# Deploy with SSL verification disabled
+# Deploy with SSL verification disabled (typical development usage)
+python deploy_mongodb_k8s.py --ssl-skip-verify --skip-preflight --wait
+
+# Or with explicit Ops Manager URL (if not using host.docker.internal)
 python deploy_mongodb_k8s.py \
+  --ssl-skip-verify \
   --skip-preflight \
   --ops-manager-url "https://192.168.65.254:8443" \
-  --ssl-skip-verify \
   --wait
 
 # The script will:
@@ -177,6 +193,9 @@ python deploy_mongodb_k8s.py \
 # 3. Set SSL_REQUIRE_VALID_MMS_CERTIFICATES: "false" env var on pods
 # 4. Skip creating the CA ConfigMap (not needed when skipping validation)
 ```
+
+> **Note**: `--skip-preflight` is commonly used with `--ssl-skip-verify` since the
+> pre-flight checks may fail when connecting to Ops Manager with invalid certificates.
 
 ## Verification
 

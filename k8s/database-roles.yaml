@@ -1,0 +1,71 @@
+# =============================================================================
+# MongoDB Database Pod Roles
+# =============================================================================
+#
+# This file defines the ServiceAccounts, Role, and RoleBinding required for
+# MongoDB database pods to function properly in the replica set namespace.
+#
+# The database pods need these permissions to:
+#   - Access Secrets for TLS certificates and credentials
+#   - Patch/delete pods for replica set reconfiguration
+#
+# Prerequisites:
+#   1. Replica set namespace created (default: mongodb-rs)
+#
+# Apply with: kubectl apply -f database-roles.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mongodb-enterprise-database-pods
+  namespace: {{RS_NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: mongodb-enterprise-database-pods
+    app.kubernetes.io/component: serviceaccount
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mongodb-enterprise-appdb
+  namespace: {{RS_NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: mongodb-enterprise-appdb
+    app.kubernetes.io/component: serviceaccount
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mongodb-enterprise-database-pods
+  namespace: {{RS_NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: mongodb-enterprise-database-pods
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [patch, delete, get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mongodb-enterprise-database-pods
+  namespace: {{RS_NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: mongodb-enterprise-database-pods
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mongodb-enterprise-database-pods
+subjects:
+  - kind: ServiceAccount
+    name: mongodb-enterprise-database-pods
+    namespace: {{RS_NAMESPACE}}

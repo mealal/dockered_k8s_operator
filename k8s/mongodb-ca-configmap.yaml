@@ -1,0 +1,35 @@
+# =============================================================================
+# MongoDB CA Certificate ConfigMap
+# =============================================================================
+#
+# This ConfigMap contains the CA certificate used for TLS connections to
+# MongoDB. It is referenced by the MongoDB CRD in the security.tls.ca field.
+#
+# The CA certificate is used to:
+#   - Verify TLS connections between clients and MongoDB
+#   - Verify TLS connections between replica set members
+#   - Sign client certificates for X509 authentication
+#
+# IMPORTANT: The key MUST be named 'ca-pem' as required by the operator.
+#
+# Prerequisites:
+#   1. CA certificate generated (./certs/ca.crt)
+#   2. Replica set namespace created (default: mongodb-rs)
+#
+# Apply with: kubectl apply -f mongodb-ca-configmap.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongodb-ca
+  namespace: {{RS_NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: mongodb-ca
+    app.kubernetes.io/component: tls
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s
+data:
+  # CA certificate in PEM format
+  # This key name is required by the MongoDB Enterprise Kubernetes Operator
+  ca-pem: |
+{{CA_CERTIFICATE}}

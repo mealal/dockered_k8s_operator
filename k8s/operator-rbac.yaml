@@ -1,0 +1,68 @@
+# =============================================================================
+# MongoDB Enterprise Operator RBAC for Replica Set Namespace
+# =============================================================================
+#
+# This file defines the Role and RoleBinding that allow the MongoDB Enterprise
+# Kubernetes Operator (running in the operator namespace) to manage resources
+# in the replica set namespace.
+#
+# The operator needs these permissions to:
+#   - Create and manage MongoDB pods (StatefulSets)
+#   - Create and manage Services for MongoDB connectivity
+#   - Access Secrets for credentials and certificates
+#   - Access ConfigMaps for configuration
+#   - Manage MongoDB custom resources
+#
+# Prerequisites:
+#   1. Operator deployed in operator namespace (default: mongodb)
+#   2. Replica set namespace created (default: mongodb-rs)
+#
+# Apply with: kubectl apply -f operator-rbac.yaml
+# =============================================================================
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mongodb-enterprise-operator
+  namespace: {{RS_NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: mongodb-enterprise-operator
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s
+rules:
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, create, update, delete, watch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, create, update, delete, watch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, create, update, delete, watch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, create, update, delete, watch]
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    verbs: [get, list, create, update, delete, watch]
+  - apiGroups: [mongodb.com]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mongodb-enterprise-operator
+  namespace: {{RS_NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: mongodb-enterprise-operator
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mongodb-enterprise-operator
+subjects:
+  - kind: ServiceAccount
+    name: mongodb-enterprise-operator
+    namespace: {{OPERATOR_NAMESPACE}}

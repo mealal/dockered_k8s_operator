@@ -1,0 +1,55 @@
+# =============================================================================
+# MongoDB User (SCRAM Authentication)
+# =============================================================================
+#
+# This MongoDBUser resource defines a database user that authenticates using
+# SCRAM (username/password). The operator will create this user in the MongoDB
+# deployment and manage it through Ops Manager.
+#
+# Prerequisites:
+#   1. MongoDB deployment with SCRAM authentication enabled
+#   2. Password secret created (mongodb-admin-password)
+#
+# Apply with: kubectl apply -f mongodb-user.yaml
+# =============================================================================
+
+apiVersion: mongodb.com/v1
+kind: MongoDBUser
+metadata:
+  name: mongodb-admin-user
+  namespace: mongodb-rs
+  labels:
+    app.kubernetes.io/name: mongodb-user
+    app.kubernetes.io/component: user
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s
+spec:
+  # Username for SCRAM authentication
+  username: "{{MONGODB_USERNAME}}"
+
+  # Database where the user is created (typically "admin" for admin users)
+  db: "admin"
+
+  # Reference to the Secret containing the password
+  passwordSecretKeyRef:
+    name: mongodb-admin-password
+    key: password
+
+  # Reference to the MongoDB resource this user belongs to
+  mongodbResourceRef:
+    name: "{{REPLICA_SET_NAME}}"
+
+  # Roles assigned to this user
+  # These determine what operations the user can perform
+  roles:
+    # Cluster-wide administration
+    - db: "admin"
+      name: "clusterAdmin"
+    # User administration across all databases
+    - db: "admin"
+      name: "userAdminAnyDatabase"
+    # Read/write access to all databases
+    - db: "admin"
+      name: "readWriteAnyDatabase"
+    # Database administration across all databases
+    - db: "admin"
+      name: "dbAdminAnyDatabase"
