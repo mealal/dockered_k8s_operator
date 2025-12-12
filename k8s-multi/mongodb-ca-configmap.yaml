@@ -1,0 +1,22 @@
+# =============================================================================
+# MongoDB CA Certificate ConfigMap
+# =============================================================================
+#
+# This ConfigMap contains the CA certificate used to verify MongoDB TLS
+# connections. Must be deployed to ALL clusters where MongoDB pods run.
+#
+# Apply with: kubectl apply -f mongodb-ca-configmap.yaml (all clusters)
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongodb-ca
+  namespace: {{RS_NAMESPACE}}
+  labels:
+    app.kubernetes.io/name: mongodb-ca
+    app.kubernetes.io/component: certificate
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
+data:
+  ca-pem: |
+{{CA_CERTIFICATE}}

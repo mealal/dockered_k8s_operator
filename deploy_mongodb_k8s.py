@@ -19,21 +19,28 @@ All tools (kind, kubectl) run inside Docker containers - no local installation r
 from __future__ import annotations
 
 import subprocess
+import json
 import sys
 import time
 import argparse
-import json
 import logging
 import os
 import re
-import shutil
-import ssl
-import urllib.request
-import urllib.error
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Optional, List, Callable, Dict
-from functools import wraps
+from typing import Optional, List, Dict
+
+# Import shared modules
+from shared.validators import positive_int, non_negative_int, valid_port, valid_namespace, valid_timeout
+from shared.utils import run_command, convert_path_for_docker, check_docker, generate_secure_password
+from shared.models import OpsManagerCredentials
+from shared.preflight import PreFlightChecker
+from shared.decorators import retry_with_backoff
+from shared.yaml_manager_base import BaseYAMLTemplateManager
+from shared.kind_manager_base import BaseKindManager
+from shared.k8s_manager_base import BaseKubernetesManager
+from shared.operator_deployer_base import BaseOperatorDeployer
+from shared.ops_manager_cleanup import cleanup_ops_manager_project
 
 # Configure logging
 logging.basicConfig(
@@ -43,149 +50,75 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Script directory for resolving relative paths
+SCRIPT_DIR = Path(__file__).parent.resolve()
+
+
+def run_openssl(args: list, description: str) -> bool:
+    """Run an OpenSSL command with proper error logging.
+    
+    Args:
+        args: Command arguments (without 'openssl' prefix)
+        description: Human-readable description of the operation
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    cmd = ["openssl"] + args
+    try:
+        result = subprocess.run(
+            cmd, check=True, capture_output=True, text=True,
+            encoding='utf-8', errors='replace'
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"OpenSSL {description} failed")
+        if e.stderr:
+            logger.error(f"OpenSSL stderr: {e.stderr.strip()}")
+        if e.stdout:
+            logger.debug(f"OpenSSL stdout: {e.stdout.strip()}")
+        return False
+    except FileNotFoundError:
+        logger.error("OpenSSL not found. Please install OpenSSL and ensure it's in your PATH.")
+        return False
+
+
 # Constants - Docker images for kind and kubectl
 KIND_NODE_IMAGE = "kindest/node:v1.28.0"
-KIND_IMAGE = "kindest/node:v1.28.0"  # We'll use alpine/k8s for kind CLI
 KUBECTL_IMAGE = "bitnami/kubectl:1.28"
 OPERATOR_VERSION = "1.33.0"
-MONGODB_VERSION = "7.0.25-ent"
 
 # Official MongoDB Enterprise Kubernetes Operator installation URLs
 OPERATOR_CRDS_URL = "https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/crds.yaml"
 OPERATOR_INSTALL_URL = "https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/mongodb-enterprise.yaml"
 
 # YAML template directory
-K8S_YAML_DIR = Path("./k8s")
+K8S_YAML_DIR = SCRIPT_DIR / "k8s"
+
+# Template file names
+KIND_CLUSTER_CONFIG_TEMPLATE = "kind-cluster-config.yaml"
 
 
 # =============================================================================
-# Argument Validation Helpers
+# Argument Validation Helpers (imported from shared.validators)
 # =============================================================================
 
-def positive_int(value: str) -> int:
-    """Argparse type validator for positive integers."""
-    try:
-        ivalue = int(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"Invalid integer value: {value}")
-    if ivalue <= 0:
-        raise argparse.ArgumentTypeError(f"Must be a positive integer, got {value}")
-    return ivalue
-
-
-def non_negative_int(value: str) -> int:
-    """Argparse type validator for non-negative integers."""
-    try:
-        ivalue = int(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"Invalid integer value: {value}")
-    if ivalue < 0:
-        raise argparse.ArgumentTypeError(f"Must be a non-negative integer, got {value}")
-    return ivalue
-
-
-def valid_port(value: str) -> int:
-    """Argparse type validator for valid port numbers (1-65535)."""
-    try:
-        ivalue = int(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"Invalid port number: {value}")
-    if not 1 <= ivalue <= 65535:
-        raise argparse.ArgumentTypeError(f"Port must be between 1 and 65535, got {value}")
-    return ivalue
-
-
-def valid_namespace(value: str) -> str:
-    """Argparse type validator for Kubernetes namespace names."""
-    if not value:
-        raise argparse.ArgumentTypeError("Namespace cannot be empty")
-    # Kubernetes namespace naming rules: lowercase, alphanumeric, hyphens, max 63 chars
-    if not re.match(r'^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]?$', value):
-        raise argparse.ArgumentTypeError(
-            f"Invalid namespace '{value}': must be lowercase alphanumeric with hyphens, max 63 chars"
-        )
-    return value
+# positive_int, non_negative_int, valid_port, valid_namespace are imported from shared.validators
 
 
 # =============================================================================
 # YAML Template Manager
 # =============================================================================
 
-class YAMLTemplateManager:
-    """Manages YAML template files for Kubernetes resources."""
+class YAMLTemplateManager(BaseYAMLTemplateManager):
+    """Manages YAML template files for single-cluster Kubernetes resources.
+
+    Inherits common functionality from BaseYAMLTemplateManager and adds
+    single-cluster specific methods for replica set configuration.
+    """
 
     def __init__(self, template_dir: Path = K8S_YAML_DIR):
-        self.template_dir = template_dir
-        self.generated_dir = template_dir / "generated"
-        self._ensure_dirs()
-
-    def _ensure_dirs(self) -> None:
-        """Ensure template and generated directories exist."""
-        self.template_dir.mkdir(parents=True, exist_ok=True)
-        self.generated_dir.mkdir(parents=True, exist_ok=True)
-
-    def _render_with_namespace(self, template_name: str, variables: Dict[str, str],
-                                namespace: Optional[str] = None,
-                                output_name: Optional[str] = None,
-                                post_process: Optional[Callable[[str], str]] = None) -> Path:
-        """Internal method for consistent template rendering with namespace support.
-
-        Args:
-            template_name: Name of the template file
-            variables: Dictionary of variables to substitute ({{KEY}} -> value)
-            namespace: Optional namespace to replace 'mongodb-rs' default
-            output_name: Optional output filename (defaults to template_name)
-            post_process: Optional function for additional content processing
-
-        Returns:
-            Path to the generated YAML file
-
-        Raises:
-            FileNotFoundError: If template file doesn't exist
-            ValueError: If unsubstituted placeholders remain
-        """
-        template_path = self.template_dir / template_name
-        if not template_path.exists():
-            raise FileNotFoundError(f"Template not found: {template_path}")
-
-        content = template_path.read_text(encoding='utf-8')
-
-        # Substitute variables
-        for key, value in variables.items():
-            content = content.replace(f"{{{{{key}}}}}", str(value))
-
-        # Update namespace if provided
-        if namespace:
-            content = re.sub(r'namespace: mongodb-rs', f'namespace: {namespace}', content)
-
-        # Apply post-processing if provided
-        if post_process:
-            content = post_process(content)
-
-        # Check for unsubstituted placeholders - fail if any remain
-        remaining = re.findall(r'\{\{[A-Z_]+\}\}', content)
-        if remaining:
-            raise ValueError(f"Unsubstituted placeholders in {template_name}: {remaining}")
-
-        # Write generated file
-        output_path = self.generated_dir / (output_name or template_name)
-        output_path.write_text(content, encoding='utf-8')
-        logger.debug(f"Generated: {output_path}")
-
-        return output_path
-
-    def render_namespace(self, namespace: str, template_name: str = "namespace.yaml",
-                         output_name: str = "namespace.yaml") -> Path:
-        """Render namespace.yaml with the specified namespace name."""
-        template_path = self.template_dir / template_name
-        content = template_path.read_text(encoding='utf-8')
-
-        # Replace namespace name using regex to handle any default name
-        content = re.sub(r'(name: )(mongodb(?:-rs)?)\n', f'\\g<1>{namespace}\n', content)
-
-        output_path = self.generated_dir / output_name
-        output_path.write_text(content, encoding='utf-8')
-        return output_path
+        super().__init__(template_dir)
 
     def render_operator_namespace(self, namespace: str) -> Path:
         """Render operator namespace.yaml."""
@@ -194,62 +127,6 @@ class YAMLTemplateManager:
     def render_rs_namespace(self, namespace: str) -> Path:
         """Render replica set namespace.yaml."""
         return self.render_namespace(namespace, "mongodb-rs-namespace.yaml", "mongodb-rs-namespace.yaml")
-
-    def render_secret(self, namespace: str, public_key: str, private_key: str) -> Path:
-        """Render ops-manager-secret.yaml with credentials."""
-        return self._render_with_namespace(
-            "ops-manager-secret.yaml",
-            {"PUBLIC_KEY": public_key, "PRIVATE_KEY": private_key},
-            namespace=namespace
-        )
-
-    def render_configmap(self, namespace: str, base_url: str, project_name: str,
-                         org_id: str, ssl_require_valid_certs: bool = True) -> Path:
-        """Render ops-manager-configmap.yaml with connection details."""
-        variables = {
-            "BASE_URL": base_url,
-            "PROJECT_NAME": project_name,
-            "ORG_ID": org_id,
-            "SSL_REQUIRE_VALID_CERTS": "true" if ssl_require_valid_certs else "false",
-        }
-
-        # Post-processor to remove CA ConfigMap reference when SSL verification is disabled
-        def remove_ca_configmap_if_needed(content: str) -> str:
-            if not ssl_require_valid_certs:
-                # Remove the sslMMSCAConfigMap line and its comments
-                content = re.sub(
-                    r'\n\s*#[^\n]*CA certificate[^\n]*\n\s*#[^\n]*\n\s*#[^\n]*\n\s*sslMMSCAConfigMap:[^\n]*',
-                    '',
-                    content
-                )
-            return content
-
-        return self._render_with_namespace(
-            "ops-manager-configmap.yaml",
-            variables,
-            namespace=namespace,
-            post_process=remove_ca_configmap_if_needed
-        )
-
-    def render_ca_configmap(self, namespace: str, ca_cert_path: Path) -> Path:
-        """Render ops-manager-ca-configmap.yaml with CA certificate."""
-        if not ca_cert_path.exists():
-            raise FileNotFoundError(f"CA certificate not found: {ca_cert_path}")
-
-        ca_cert_content = ca_cert_path.read_text(encoding='utf-8').strip()
-        # Indent the certificate for YAML embedding
-        indented_cert = "\n".join("    " + line for line in ca_cert_content.split("\n"))
-
-        # Post-processor to replace the indented placeholder with the certificate
-        def embed_certificate(content: str) -> str:
-            return content.replace("    {{CA_CERTIFICATE}}", indented_cert)
-
-        return self._render_with_namespace(
-            "ops-manager-ca-configmap.yaml",
-            {},  # No standard variables, cert handled via post-processor
-            namespace=namespace,
-            post_process=embed_certificate
-        )
 
     def render_replicaset(self, namespace: str, rs_name: str,
                           tls_require_valid_certs: bool = True) -> Path:
@@ -327,22 +204,6 @@ class YAMLTemplateManager:
 
         return [int(port) for port in matches] if matches else [27017]
 
-    def render_user_secret(self, namespace: str, password: str) -> Path:
-        """Render mongodb-user-secret.yaml with user password."""
-        return self._render_with_namespace(
-            "mongodb-user-secret.yaml",
-            {"MONGODB_USER_PASSWORD": password},
-            namespace=namespace
-        )
-
-    def render_user(self, namespace: str, username: str, rs_name: str) -> Path:
-        """Render mongodb-user.yaml with user configuration."""
-        return self._render_with_namespace(
-            "mongodb-user.yaml",
-            {"MONGODB_USERNAME": username, "REPLICA_SET_NAME": rs_name},
-            namespace=namespace
-        )
-
     def render_x509_user(self, namespace: str, x509_username: str, rs_name: str) -> Path:
         """Render mongodb-x509-user.yaml with X509 user configuration.
 
@@ -357,232 +218,14 @@ class YAMLTemplateManager:
             namespace=namespace
         )
 
-    def render_operator_rbac(self, rs_namespace: str, operator_namespace: str) -> Path:
-        """Render operator-rbac.yaml with namespace configuration."""
-        return self._render_with_namespace(
-            "operator-rbac.yaml",
-            {"RS_NAMESPACE": rs_namespace, "OPERATOR_NAMESPACE": operator_namespace}
-        )
-
-    def render_database_roles(self, rs_namespace: str) -> Path:
-        """Render database-roles.yaml with namespace configuration."""
-        return self._render_with_namespace(
-            "database-roles.yaml",
-            {"RS_NAMESPACE": rs_namespace}
-        )
-
-    def render_mongodb_ca_configmap(self, rs_namespace: str, ca_cert_path: Path) -> Path:
-        """Render mongodb-ca-configmap.yaml with CA certificate.
-
-        Args:
-            rs_namespace: Namespace where replica set will be deployed
-            ca_cert_path: Path to CA certificate file
-        """
-        if not ca_cert_path.exists():
-            raise FileNotFoundError(f"CA certificate not found: {ca_cert_path}")
-
-        ca_cert_content = ca_cert_path.read_text(encoding='utf-8').strip()
-        # Indent the certificate for YAML embedding (4 spaces for ca-pem value)
-        indented_cert = "\n".join("    " + line for line in ca_cert_content.split("\n"))
-
-        # Post-processor to embed the certificate with proper indentation
-        def embed_certificate(content: str) -> str:
-            return content.replace("{{CA_CERTIFICATE}}", indented_cert)
-
-        return self._render_with_namespace(
-            "mongodb-ca-configmap.yaml",
-            {"RS_NAMESPACE": rs_namespace},
-            post_process=embed_certificate
-        )
-
-    def get_generated_files(self) -> List[Path]:
-        """Get list of all generated YAML files."""
-        if not self.generated_dir.exists():
-            return []
-        return sorted(self.generated_dir.glob("*.yaml"))
-
-    def clean_generated(self) -> None:
-        """Remove all generated YAML files."""
-        if self.generated_dir.exists():
-            shutil.rmtree(self.generated_dir)
-            self.generated_dir.mkdir(parents=True, exist_ok=True)
-            logger.info("Cleaned generated YAML files")
-
 
 # =============================================================================
-# Utility Functions
+# Utility Functions (imported from shared modules)
 # =============================================================================
 
-def retry_with_backoff(max_retries: int = 3, base_delay: float = 2.0,
-                       max_delay: float = 30.0, exceptions: tuple = (Exception,)):
-    """Decorator for retrying operations with exponential backoff."""
-    def decorator(func: Callable):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            last_exception = None
-            delay = base_delay
-            for attempt in range(max_retries):
-                try:
-                    return func(*args, **kwargs)
-                except exceptions as e:
-                    last_exception = e
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {delay:.1f}s...")
-                        time.sleep(delay)
-                        delay = min(delay * 2, max_delay)
-                    else:
-                        logger.error(f"All {max_retries} attempts failed")
-            raise last_exception
-        return wrapper
-    return decorator
-
-
-class PreFlightChecker:
-    """Pre-flight validation checks before deployment."""
-
-    def __init__(self, ops_manager_url: str, credentials_file: str, ca_cert_path: str = "./certs/ca.crt"):
-        self.ops_manager_url = ops_manager_url
-        self.credentials_file = credentials_file
-        self.ca_cert_path = ca_cert_path
-        self.errors: List[str] = []
-        self.warnings: List[str] = []
-
-    def check_all(self) -> bool:
-        """Run all pre-flight checks. Returns True if all critical checks pass."""
-        logger.info("Running pre-flight checks...")
-
-        checks = [
-            ("Docker running", self._check_docker),
-            ("Credentials file exists", self._check_credentials_file),
-            ("CA certificate exists", self._check_ca_cert),
-            ("Ops Manager reachable", self._check_ops_manager_connectivity),
-        ]
-
-        all_passed = True
-        for check_name, check_func in checks:
-            try:
-                result = check_func()
-                status = "✓" if result else "✗"
-                level = "PASS" if result else "FAIL"
-                logger.info(f"  [{status}] {check_name}: {level}")
-                if not result:
-                    all_passed = False
-            except Exception as e:
-                logger.error(f"  [✗] {check_name}: ERROR - {e}")
-                self.errors.append(f"{check_name}: {e}")
-                all_passed = False
-
-        if self.warnings:
-            logger.warning("Warnings:")
-            for warning in self.warnings:
-                logger.warning(f"  - {warning}")
-
-        if self.errors:
-            logger.error("Errors:")
-            for error in self.errors:
-                logger.error(f"  - {error}")
-
-        return all_passed
-
-    def _check_docker(self) -> bool:
-        """Check if Docker is running."""
-        try:
-            result = subprocess.run(
-                ["docker", "info"],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            self.errors.append("Docker is not running or not installed")
-            return False
-
-    def _check_credentials_file(self) -> bool:
-        """Check if credentials file exists and is valid."""
-        path = Path(self.credentials_file)
-        if not path.exists():
-            self.errors.append(f"Credentials file not found: {self.credentials_file}")
-            return False
-
-        try:
-            with open(path) as f:
-                data = json.load(f)
-            required_fields = ['publicKey', 'privateKey', 'orgId', 'projectId']
-            missing = [f for f in required_fields if f not in data]
-            if missing:
-                self.errors.append(f"Missing fields in credentials: {missing}")
-                return False
-            return True
-        except json.JSONDecodeError as e:
-            self.errors.append(f"Invalid JSON in credentials file: {e}")
-            return False
-
-    def _check_ca_cert(self) -> bool:
-        """Check if CA certificate exists."""
-        path = Path(self.ca_cert_path)
-        if not path.exists():
-            self.errors.append(f"CA certificate not found: {self.ca_cert_path}")
-            self.errors.append("Run deploy_ops_manager.py first to generate certificates")
-            return False
-        return True
-
-    def _check_ops_manager_connectivity(self) -> bool:
-        """Check if Ops Manager is reachable."""
-        # Create SSL context that trusts our custom CA
-        ssl_context = ssl.create_default_context()
-
-        ca_path = Path(self.ca_cert_path)
-        if ca_path.exists():
-            ssl_context.load_verify_locations(str(ca_path))
-        else:
-            # Fall back to not verifying if CA doesn't exist
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-
-        # Try to connect to Ops Manager
-        # Use localhost since we're checking from the host machine
-        test_url = self.ops_manager_url.replace("host.docker.internal", "localhost")
-
-        try:
-            req = urllib.request.Request(f"{test_url}/user/login")
-            with urllib.request.urlopen(req, context=ssl_context, timeout=10) as response:
-                return response.status in [200, 302, 303]
-        except urllib.error.HTTPError as e:
-            # 401/403 still means the server is reachable
-            if e.code in [401, 403]:
-                return True
-            self.warnings.append(f"Ops Manager returned HTTP {e.code}")
-            return True  # Server is reachable but returned an error
-        except Exception as e:
-            self.errors.append(f"Cannot reach Ops Manager at {test_url}: {e}")
-            self.errors.append("Make sure Ops Manager is running (python deploy_ops_manager.py)")
-            return False
-
-
-@dataclass
-class OpsManagerCredentials:
-    """Credentials for connecting to Ops Manager."""
-    public_key: str
-    private_key: str
-    base_url: str
-    org_id: str
-    project_id: str
-    project_name: str = "Default"
-
-    @classmethod
-    def from_file(cls, filepath: str) -> 'OpsManagerCredentials':
-        """Load credentials from ops-manager-api-key.json."""
-        with open(filepath, 'r') as f:
-            data = json.load(f)
-        return cls(
-            public_key=data['publicKey'],
-            private_key=data['privateKey'],
-            base_url=data['baseUrl'],
-            org_id=data['orgId'],
-            project_id=data['projectId'],
-            project_name=data.get('projectName', 'Default')
-        )
+# retry_with_backoff imported from shared.decorators
+# PreFlightChecker imported from shared.preflight
+# OpsManagerCredentials imported from shared.models
 
 
 @dataclass
@@ -602,12 +245,7 @@ class ClusterConfig:
         return self.operator_namespace
 
 
-def generate_secure_password(length: int = 16) -> str:
-    """Generate a cryptographically secure password."""
-    import secrets
-    import string
-    alphabet = string.ascii_letters + string.digits + "!@#$%&*"
-    return ''.join(secrets.choice(alphabet) for _ in range(length))
+# generate_secure_password imported from shared.utils
 
 
 @dataclass
@@ -723,257 +361,85 @@ class MongoDBStatusMonitor:
         return False
 
 
-def run_command(cmd: List[str], check: bool = True, capture: bool = True,
-                timeout: Optional[int] = None, input_data: Optional[str] = None) -> subprocess.CompletedProcess:
-    """Run a shell command."""
-    logger.debug(f"Running: {' '.join(cmd)}")
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=capture,
-            text=True,
-            timeout=timeout,
-            input=input_data
-        )
-        if check and result.returncode != 0:
-            logger.error(f"Command failed: {result.stderr}")
-            raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
-        return result
-    except subprocess.TimeoutExpired:
-        logger.error(f"Command timed out: {' '.join(cmd)}")
-        raise
-    except FileNotFoundError:
-        # Command not found
-        result = subprocess.CompletedProcess(cmd, 1, "", "Command not found")
-        if check:
-            raise
-        return result
+# run_command and convert_path_for_docker imported from shared.utils
 
 
-def convert_path_for_docker(path: Path) -> str:
-    """Convert Windows path to Docker-compatible path."""
-    path_str = str(path.resolve())
-    if sys.platform == "win32":
-        # Convert D:\path to /d/path for Docker
-        if len(path_str) >= 2 and path_str[1] == ':':
-            drive = path_str[0].lower()
-            return f"/{drive}{path_str[2:].replace(os.sep, '/')}"
-    return path_str
+class KindManager(BaseKindManager):
+    """Manages kind Kubernetes cluster for single-cluster deployment.
 
-
-class KindManager:
-    """Manages kind Kubernetes cluster - downloads kind binary if not found."""
-
-    KIND_VERSION = "v0.20.0"
-    KIND_DOWNLOAD_URLS = {
-        "win32": f"https://kind.sigs.k8s.io/dl/v0.20.0/kind-windows-amd64",
-        "linux": f"https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64",
-        "darwin": f"https://kind.sigs.k8s.io/dl/v0.20.0/kind-darwin-amd64",
-    }
+    Inherits common functionality from BaseKindManager and adds
+    single-cluster specific configuration handling.
+    """
 
     def __init__(self, config: ClusterConfig, yaml_manager: Optional[YAMLTemplateManager] = None):
         self.config = config
         self.yaml_manager = yaml_manager or YAMLTemplateManager()
-        self.kubeconfig_path = Path(config.kubeconfig_dir).resolve()
-        self.kubeconfig_file = self.kubeconfig_path / "config"
-        self.kind_config_file = self.kubeconfig_path / "kind-config.yaml"
-        self.kubeconfig_path.mkdir(parents=True, exist_ok=True)
+        self.kubeconfig_file = Path(config.kubeconfig_dir).resolve() / "config"
 
-        # Local kind binary path
-        kind_ext = ".exe" if sys.platform == "win32" else ""
-        self.local_kind_binary = self.kubeconfig_path / f"kind{kind_ext}"
+        # Initialize base class
+        super().__init__(Path(config.kubeconfig_dir))
 
-        # Check if kind is available (native or local)
-        self.kind_binary = self._get_kind_binary()
+    def cluster_exists(self, cluster_name: str = None) -> bool:
+        """Check if a cluster already exists.
 
-    def _get_kind_binary(self) -> str:
-        """Get path to kind binary, download if necessary."""
-        # Check native kind first
-        try:
-            result = run_command(["kind", "version"], check=False)
-            if result.returncode == 0:
-                logger.info("Using system kind")
-                return "kind"
-        except FileNotFoundError:
-            pass
-
-        # Check local kind binary
-        if self.local_kind_binary.exists():
-            logger.info(f"Using local kind binary: {self.local_kind_binary}")
-            return str(self.local_kind_binary)
-
-        # Download kind
-        logger.info("kind not found, downloading...")
-        return self._download_kind()
-
-    def _download_kind(self) -> str:
-        """Download kind binary for current platform."""
-        import urllib.request
-
-        platform = sys.platform
-        if platform not in self.KIND_DOWNLOAD_URLS:
-            raise RuntimeError(f"Unsupported platform: {platform}")
-
-        url = self.KIND_DOWNLOAD_URLS[platform]
-        logger.info(f"Downloading kind from: {url}")
-
-        try:
-            urllib.request.urlretrieve(url, str(self.local_kind_binary))
-
-            # Make executable on Unix
-            if sys.platform != "win32":
-                import stat
-                self.local_kind_binary.chmod(
-                    self.local_kind_binary.stat().st_mode | stat.S_IEXEC
-                )
-
-            logger.info(f"kind downloaded to: {self.local_kind_binary}")
-            return str(self.local_kind_binary)
-        except Exception as e:
-            raise RuntimeError(f"Failed to download kind: {e}")
-
-    def _run_kind(self, args: List[str], check: bool = True) -> subprocess.CompletedProcess:
-        """Run kind command."""
-        return run_command([self.kind_binary] + args, check=check, timeout=300)
-
-    def _create_kind_config(self) -> None:
-        """Create kind cluster configuration file.
-
-        Configures port mappings for MongoDB external access via NodePort.
-        Port numbers are extracted from the replicaset template's connectivity.replicaSetHorizons.
+        Args:
+            cluster_name: Name of cluster to check (defaults to configured cluster)
         """
+        name = cluster_name if cluster_name is not None else self.config.name
+        return super().cluster_exists(name)
+
+    def create_cluster(self) -> bool:
+        """Create the kind cluster with port mappings from template."""
         # Extract ports from template
         external_ports = self.yaml_manager.get_external_ports()
 
-        # Build port mappings from template
-        port_mappings = ""
-        for port in external_ports:
-            port_mappings += f"""      - containerPort: {port}
-        hostPort: {port}
-        protocol: TCP
-"""
+        # Generate config content
+        config_content = self.yaml_manager.render_kind_cluster_config(external_ports)
 
-        config_content = f"""kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-name: {self.config.name}
-nodes:
-  - role: control-plane
-    extraPortMappings:
-      # MongoDB external access ports (NodePort services)
-{port_mappings}"""
+        # Add worker nodes if configured
         for _ in range(self.config.worker_nodes):
             config_content += "  - role: worker\n"
 
-        self.kind_config_file.write_text(config_content)
-        logger.info(f"Created kind config: {self.kind_config_file}")
-
-    def cluster_exists(self) -> bool:
-        """Check if cluster already exists."""
-        try:
-            result = self._run_kind(["get", "clusters"], check=False)
-            return self.config.name in result.stdout.split('\n')
-        except subprocess.TimeoutExpired:
-            logger.warning("Timeout checking for existing clusters")
-            return False
-        except subprocess.CalledProcessError:
-            return False
-        except FileNotFoundError:
-            logger.warning("kind binary not found")
-            return False
-
-    def create_cluster(self) -> bool:
-        """Create the kind cluster."""
-        logger.info(f"Creating kind cluster: {self.config.name}")
-
-        if self.cluster_exists():
-            logger.info(f"Cluster {self.config.name} already exists")
-            self._export_kubeconfig()
-            return True
-
-        self._create_kind_config()
-
-        try:
-            self._run_kind([
-                "create", "cluster",
-                "--name", self.config.name,
-                "--config", str(self.kind_config_file),
-                "--wait", "120s"
-            ])
-
-            logger.info(f"Cluster {self.config.name} created successfully")
-            self._export_kubeconfig()
-            return True
-        except subprocess.TimeoutExpired:
-            logger.error("Cluster creation timed out")
-            return False
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to create cluster: {e.stderr if e.stderr else e}")
-            return False
-        except FileNotFoundError:
-            logger.error("kind binary not found - ensure Docker is running")
-            return False
-
-    def _export_kubeconfig(self) -> None:
-        """Export kubeconfig for the cluster."""
-        try:
-            result = self._run_kind(["get", "kubeconfig", "--name", self.config.name])
-            self.kubeconfig_file.write_text(result.stdout)
-            logger.info(f"Kubeconfig exported to: {self.kubeconfig_file}")
-        except Exception as e:
-            logger.warning(f"Could not export kubeconfig: {e}")
+        return self.create_cluster_with_config(
+            self.config.name,
+            config_content,
+            self.kubeconfig_file
+        )
 
     def delete_cluster(self) -> bool:
         """Delete the kind cluster."""
-        logger.info(f"Deleting kind cluster: {self.config.name}")
-        try:
-            self._run_kind(["delete", "cluster", "--name", self.config.name])
-            logger.info(f"Cluster {self.config.name} deleted")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to delete cluster: {e}")
-            return False
+        return super().delete_cluster(self.config.name)
 
 
-class KubernetesManager:
-    """Manages Kubernetes resources using kubectl via Docker."""
+class KubernetesManager(BaseKubernetesManager):
+    """Manages Kubernetes resources for single-cluster deployment.
+
+    Inherits common functionality from BaseKubernetesManager and adds
+    single-cluster specific convenience methods.
+    """
 
     def __init__(self, config: ClusterConfig):
+        super().__init__(kubectl_image=KUBECTL_IMAGE)
         self.config = config
         self.kubeconfig_path = Path(config.kubeconfig_dir).resolve()
         self.kubeconfig_file = self.kubeconfig_path / "config"
 
-        # Check if native kubectl is available
-        try:
-            result = run_command(["kubectl", "version", "--client"], check=False)
-            self._use_native = result.returncode == 0
-        except FileNotFoundError:
-            self._use_native = False
+    def run_kubectl(self, args: List[str], kubeconfig: Path = None,
+                    check: bool = True, input_data: Optional[str] = None,
+                    timeout: int = 120) -> subprocess.CompletedProcess:
+        """Run kubectl command using the configured kubeconfig.
 
-    def run_kubectl(self, args: List[str], check: bool = True,
-                    input_data: Optional[str] = None) -> subprocess.CompletedProcess:
-        """Run kubectl command - native or via Docker."""
-        if self._use_native:
-            cmd = ["kubectl", "--kubeconfig", str(self.kubeconfig_file)] + args
-            return run_command(cmd, check=check, input_data=input_data, timeout=120)
-        else:
-            return self._run_kubectl_docker(args, check=check, input_data=input_data)
-
-    def _run_kubectl_docker(self, args: List[str], check: bool = True,
-                            input_data: Optional[str] = None) -> subprocess.CompletedProcess:
-        """Run kubectl via Docker container."""
-        kubeconfig_mount = convert_path_for_docker(self.kubeconfig_path)
-
-        cmd = [
-            "docker", "run", "--rm", "-i",
-            "-v", f"{kubeconfig_mount}:/root/.kube:ro",
-            "--network", "host",
-            KUBECTL_IMAGE
-        ] + args
-
-        return run_command(cmd, check=check, input_data=input_data, timeout=120)
+        Args:
+            args: kubectl arguments
+            kubeconfig: Ignored - uses configured kubeconfig (for API compatibility)
+            check: If True, raise on non-zero exit
+            input_data: Optional stdin data
+            timeout: Command timeout in seconds
+        """
+        return super().run_kubectl(args, self.kubeconfig_file, check, input_data, timeout)
 
     def create_namespace(self, namespace: Optional[str] = None) -> bool:
-        """Create a Kubernetes namespace."""
+        """Create a Kubernetes namespace if it doesn't exist."""
         ns = namespace or self.config.operator_namespace
         logger.info(f"Creating namespace: {ns}")
         try:
@@ -981,7 +447,6 @@ class KubernetesManager:
             if result.returncode == 0:
                 logger.info(f"Namespace {ns} already exists")
                 return True
-
             self.run_kubectl(["create", "namespace", ns])
             logger.info(f"Namespace {ns} created")
             return True
@@ -999,56 +464,15 @@ class KubernetesManager:
 
     def apply_yaml(self, yaml_content: str, namespace: Optional[str] = None) -> bool:
         """Apply YAML configuration."""
-        try:
-            args = ["apply", "-f", "-"]
-            if namespace:
-                args.extend(["-n", namespace])
-            self.run_kubectl(args, input_data=yaml_content)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to apply YAML: {e}")
-            return False
+        return super().apply_yaml(yaml_content, self.kubeconfig_file, namespace)
 
     def wait_for_deployment(self, name: str, namespace: str, timeout: int = 300) -> bool:
         """Wait for a deployment to be ready."""
-        logger.info(f"Waiting for deployment {name} to be ready...")
-        try:
-            self.run_kubectl([
-                "wait", "--for=condition=available",
-                f"deployment/{name}",
-                "-n", namespace,
-                f"--timeout={timeout}s"
-            ])
-            logger.info(f"Deployment {name} is ready")
-            return True
-        except Exception as e:
-            logger.error(f"Deployment {name} not ready: {e}")
-            return False
+        return super().wait_for_deployment(name, namespace, self.kubeconfig_file, timeout)
 
     def wait_for_pods(self, label: str, namespace: str, expected: int, timeout: int = 300) -> bool:
         """Wait for pods to be ready."""
-        logger.info(f"Waiting for {expected} pods with label {label}...")
-        start_time = time.time()
-
-        while time.time() - start_time < timeout:
-            result = self.run_kubectl([
-                "get", "pods", "-n", namespace,
-                "-l", label,
-                "-o", "jsonpath={.items[*].status.phase}"
-            ], check=False)
-
-            if result.returncode == 0:
-                phases = result.stdout.split()
-                running = sum(1 for p in phases if p == "Running")
-                if running >= expected:
-                    logger.info(f"All {expected} pods are running")
-                    return True
-                logger.info(f"Pods running: {running}/{expected}")
-
-            time.sleep(10)
-
-        logger.error("Timeout waiting for pods")
-        return False
+        return super().wait_for_pods(label, namespace, self.kubeconfig_file, expected, timeout)
 
 
 class MongoDBOperatorDeployer:
@@ -1126,7 +550,7 @@ class MongoDBOperatorDeployer:
         logger.info(f"Creating/updating Ops Manager CA ConfigMap in {rs_namespace}...")
 
         # Read the CA certificate from the certs directory
-        ca_cert_path = Path("./certs/ca.crt")
+        ca_cert_path = SCRIPT_DIR / "certs/ca.crt"
         if not ca_cert_path.exists():
             logger.error("CA certificate not found. Run deploy_ops_manager.py first.")
             return False
@@ -1283,14 +707,14 @@ class MongoDBReplicaSetDeployer:
         """
         rs_namespace = self.cluster_config.rs_namespace
         rs_name = self.rs_config.name
-        certs_dir = Path("./certs/mongodb")
+        certs_dir = SCRIPT_DIR / "certs/mongodb"
         certs_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"Generating MongoDB TLS certificates for {rs_name}...")
 
         # Use existing CA from ./certs/
-        ca_cert = Path("./certs/ca.crt")
-        ca_key = Path("./certs/ca.key")
+        ca_cert = SCRIPT_DIR / "certs/ca.crt"
+        ca_key = SCRIPT_DIR / "certs/ca.key"
 
         if not ca_cert.exists() or not ca_key.exists():
             logger.error("CA certificate not found. Run deploy_ops_manager.py first.")
@@ -1331,33 +755,40 @@ subjectAltName = {san_list}
         mongodb_csr = certs_dir / "mongodb.csr"
         mongodb_cert = certs_dir / "mongodb.crt"
 
-        try:
-            # Generate private key
-            subprocess.run([
-                "openssl", "genrsa", "-out", str(mongodb_key), "2048"
-            ], check=True, capture_output=True)
-
-            # Generate CSR
-            subprocess.run([
-                "openssl", "req", "-new", "-key", str(mongodb_key),
-                "-out", str(mongodb_csr), "-config", str(ext_file)
-            ], check=True, capture_output=True)
-
-            # Sign certificate with CA
-            subprocess.run([
-                "openssl", "x509", "-req", "-in", str(mongodb_csr),
-                "-CA", str(ca_cert), "-CAkey", str(ca_key),
-                "-CAcreateserial", "-out", str(mongodb_cert),
-                "-days", "365", "-extensions", "v3_req",
-                "-extfile", str(ext_file)
-            ], check=True, capture_output=True)
-
-            logger.info(f"Generated MongoDB certificate: {mongodb_cert}")
-            return True
-
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to generate MongoDB certificates: {e}")
+        # Generate private key
+        if not run_openssl(
+            ["genrsa", "-out", str(mongodb_key), "2048"],
+            "private key generation"
+        ):
             return False
+
+        # Generate CSR
+        if not run_openssl(
+            ["req", "-new", "-key", str(mongodb_key),
+             "-out", str(mongodb_csr), "-config", str(ext_file)],
+            "CSR generation"
+        ):
+            return False
+
+        # Sign certificate with CA
+        if not run_openssl(
+            ["x509", "-req", "-in", str(mongodb_csr),
+             "-CA", str(ca_cert), "-CAkey", str(ca_key),
+             "-CAcreateserial", "-out", str(mongodb_cert),
+             "-days", "365", "-extensions", "v3_req",
+             "-extfile", str(ext_file)],
+            "certificate signing"
+        ):
+            return False
+
+        logger.info(f"Generated MongoDB certificate: {mongodb_cert}")
+
+        # Clean up temporary files (CSR and extension config)
+        for temp_file in [mongodb_csr, ext_file]:
+            if temp_file.exists():
+                temp_file.unlink()
+
+        return True
 
     def create_mongodb_tls_secrets(self) -> bool:
         """Create TLS certificate secrets for MongoDB.
@@ -1375,8 +806,8 @@ subjectAltName = {san_list}
             logger.error("Failed to generate MongoDB certificates")
             return False
 
-        certs_dir = Path("./certs")
-        mongodb_certs_dir = Path("./certs/mongodb")
+        certs_dir = SCRIPT_DIR / "certs"
+        mongodb_certs_dir = SCRIPT_DIR / "certs/mongodb"
 
         logger.info(f"Creating MongoDB TLS secrets in {rs_namespace}...")
 
@@ -1452,14 +883,14 @@ subjectAltName = {san_list}
             The certificate subject DN in RFC2253 format (e.g., O=MongoDB,OU=clients,CN=x509-client),
             or None if generation failed.
         """
-        certs_dir = Path("./certs/mongodb")
+        certs_dir = SCRIPT_DIR / "certs/mongodb"
         certs_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"Generating X509 client certificate for '{cn}'...")
 
         # Use existing CA from ./certs/
-        ca_cert = Path("./certs/ca.crt")
-        ca_key = Path("./certs/ca.key")
+        ca_cert = SCRIPT_DIR / "certs/ca.crt"
+        ca_key = SCRIPT_DIR / "certs/ca.key"
 
         if not ca_cert.exists() or not ca_key.exists():
             logger.error("CA certificate not found. Run deploy_ops_manager.py first.")
@@ -1498,41 +929,47 @@ extendedKeyUsage = clientAuth
         client_cert = certs_dir / "client.crt"
         client_pem = certs_dir / "client.pem"  # Combined cert+key for mongosh
 
-        try:
-            # Generate private key
-            subprocess.run([
-                "openssl", "genrsa", "-out", str(client_key), "2048"
-            ], check=True, capture_output=True)
-
-            # Generate CSR with the specified subject
-            subprocess.run([
-                "openssl", "req", "-new", "-key", str(client_key),
-                "-out", str(client_csr), "-config", str(ext_file)
-            ], check=True, capture_output=True)
-
-            # Sign certificate with CA
-            subprocess.run([
-                "openssl", "x509", "-req", "-in", str(client_csr),
-                "-CA", str(ca_cert), "-CAkey", str(ca_key),
-                "-CAcreateserial", "-out", str(client_cert),
-                "-days", "365", "-extensions", "v3_req",
-                "-extfile", str(ext_file)
-            ], check=True, capture_output=True)
-
-            # Create combined PEM file for mongosh (cert + key)
-            cert_content = client_cert.read_text()
-            key_content = client_key.read_text()
-            client_pem.write_text(cert_content + key_content)
-
-            logger.info(f"Generated X509 client certificate: {client_cert}")
-            logger.info(f"Generated combined PEM file: {client_pem}")
-            logger.info(f"Certificate subject DN (RFC2253): {x509_subject_dn}")
-
-            return x509_subject_dn
-
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to generate client certificate: {e}")
+        # Generate private key
+        if not run_openssl(
+            ["genrsa", "-out", str(client_key), "2048"],
+            "client private key generation"
+        ):
             return None
+
+        # Generate CSR with the specified subject
+        if not run_openssl(
+            ["req", "-new", "-key", str(client_key),
+             "-out", str(client_csr), "-config", str(ext_file)],
+            "client CSR generation"
+        ):
+            return None
+
+        # Sign certificate with CA
+        if not run_openssl(
+            ["x509", "-req", "-in", str(client_csr),
+             "-CA", str(ca_cert), "-CAkey", str(ca_key),
+             "-CAcreateserial", "-out", str(client_cert),
+             "-days", "365", "-extensions", "v3_req",
+             "-extfile", str(ext_file)],
+            "client certificate signing"
+        ):
+            return None
+
+        # Create combined PEM file for mongosh (cert + key)
+        cert_content = client_cert.read_text()
+        key_content = client_key.read_text()
+        client_pem.write_text(cert_content + key_content)
+
+        logger.info(f"Generated X509 client certificate: {client_cert}")
+        logger.info(f"Generated combined PEM file: {client_pem}")
+        logger.info(f"Certificate subject DN (RFC2253): {x509_subject_dn}")
+
+        # Clean up temporary files (CSR and extension config)
+        for temp_file in [client_csr, ext_file]:
+            if temp_file.exists():
+                temp_file.unlink()
+
+        return x509_subject_dn
 
     def create_x509_user(self, x509_subject_dn: str) -> bool:
         """Create MongoDB X509 user via the operator.
@@ -1622,7 +1059,8 @@ extendedKeyUsage = clientAuth
         logger.info("Replica set CR created, waiting for pods...")
 
         # Create SCRAM and X509 users (always enabled)
-        time.sleep(5)  # Wait a moment for the CR to be processed
+        # Brief delay allows operator to initialize the CR before we create dependent MongoDBUser resources
+        time.sleep(5)
         if not self.create_mongodb_user():
             logger.warning("Failed to create SCRAM MongoDB user, but continuing...")
 
@@ -1748,17 +1186,7 @@ kubectl port-forward -n {rs_ns} svc/mongodb-rs-svc 27017:27017
 """)
 
 
-def check_docker() -> bool:
-    """Check if Docker is running."""
-    try:
-        result = run_command(["docker", "info"], check=False)
-        if result.returncode != 0:
-            logger.error("Docker is not running. Please start Docker and try again.")
-            return False
-        return True
-    except FileNotFoundError:
-        logger.error("Docker is not installed.")
-        return False
+# check_docker imported from shared.utils
 
 
 def main():
@@ -1824,8 +1252,8 @@ All tools (kind, kubectl) run via Docker - no local installation required!
     mode_group.add_argument("--skip-preflight", action="store_true", help="Skip pre-flight validation checks")
     mode_group.add_argument("--wait", action="store_true",
                             help="Wait for MongoDB to reach Running state")
-    mode_group.add_argument("--wait-timeout", type=positive_int, default=600,
-                            help="Timeout for --wait in seconds (default: 600)")
+    mode_group.add_argument("--wait-timeout", type=valid_timeout(60, 1800), default=600,
+                            help="Timeout for --wait in seconds (default: 600, min: 60, max: 1800)")
     mode_group.add_argument("--dry-run", action="store_true",
                             help="Show what would be done without making changes")
 
@@ -1847,6 +1275,14 @@ All tools (kind, kubectl) run via Docker - no local installation required!
         kubeconfig_dir=args.kubeconfig_dir,
         ssl_skip_verify=args.ssl_skip_verify
     )
+
+    # Warn about SSL verification bypass
+    if cluster_config.ssl_skip_verify:
+        logger.warning("=" * 60)
+        logger.warning("SSL CERTIFICATE VERIFICATION DISABLED")
+        logger.warning("This configuration is INSECURE and NOT suitable for production!")
+        logger.warning("MITM attacks are possible. Use only for testing/development.")
+        logger.warning("=" * 60)
 
     # Security features (TLS, SCRAM+X509 auth, external access via NodePort) are always enabled
     # Static values (members, version, ports, resources) are defined in YAML templates
@@ -1903,6 +1339,13 @@ All tools (kind, kubectl) run via Docker - no local installation required!
 
     # Handle cleanup
     if args.cleanup:
+        # Clean up Ops Manager project first (removes stale automation config)
+        logger.info("Cleaning up Ops Manager project...")
+        cleanup_ops_manager_project(
+            api_key_file=args.api_key_file,
+            project_type="singleCluster",
+            verify_ssl=not cluster_config.ssl_skip_verify
+        )
         kind_manager.delete_cluster()
         return
 
@@ -1918,14 +1361,17 @@ All tools (kind, kubectl) run via Docker - no local installation required!
 
     # Load credentials
     try:
-        credentials = OpsManagerCredentials.from_file(args.api_key_file)
+        credentials = OpsManagerCredentials.from_file(args.api_key_file, project_type="singleCluster")
         logger.info(f"Loaded Ops Manager credentials from: {args.api_key_file}")
     except FileNotFoundError:
         logger.error(f"API key file not found: {args.api_key_file}")
         logger.error("Run deploy_ops_manager.py first to generate credentials")
         sys.exit(1)
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        logger.error(f"Failed to parse credentials file: {e}")
+        sys.exit(1)
     except Exception as e:
-        logger.error(f"Failed to load credentials: {e}")
+        logger.error(f"Unexpected error loading credentials: {e}")
         sys.exit(1)
 
     # Initialize YAML template manager
@@ -1998,7 +1444,7 @@ Generated YAML: {yaml_manager.generated_dir.resolve()}
 """)
 
     # Print connection instructions (security features are always enabled)
-    certs_path = Path("./certs").resolve()
+    certs_path = SCRIPT_DIR / "certs".resolve()
     # Extract external hosts from template
     external_hosts = yaml_manager.get_external_hosts()
     print(f"""

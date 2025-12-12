@@ -1,0 +1,37 @@
+# =============================================================================
+# MongoDB User
+# =============================================================================
+#
+# This MongoDBUser resource creates a SCRAM user for MongoDB authentication.
+#
+# Apply with: kubectl apply -f mongodb-user.yaml (central cluster)
+# =============================================================================
+
+apiVersion: mongodb.com/v1
+kind: MongoDBUser
+metadata:
+  name: {{MONGODB_USERNAME}}
+  namespace: mongodb-rs
+  labels:
+    app.kubernetes.io/name: mongodb-user
+    app.kubernetes.io/component: user
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
+spec:
+  passwordSecretKeyRef:
+    name: mongodb-admin-password
+    key: password
+  username: {{MONGODB_USERNAME}}
+  db: admin
+  mongodbResourceRef:
+    name: {{REPLICA_SET_NAME}}
+  roles:
+    - db: admin
+      name: root
+    - db: admin
+      name: clusterAdmin
+    - db: admin
+      name: userAdminAnyDatabase
+    - db: admin
+      name: dbAdminAnyDatabase
+    - db: admin
+      name: readWriteAnyDatabase

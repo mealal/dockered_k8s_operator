@@ -4,17 +4,21 @@
 
 # Project-specific sensitive files
 # ---------------------------------
-# Sensitive credentials and API keys
+# Sensitive credentials and API keys (contains both singleCluster and multiCluster projects)
 ops-manager-api-key.json
 
 # Generated certificates (contain private keys)
 certs/
 
-# Kubernetes kubeconfig and kind binary
+# Kubernetes kubeconfig and kind binary (single-cluster)
 .kube/
+
+# Kubernetes kubeconfig and kind binary (multi-cluster)
+.kube-multi/
 
 # Generated Kubernetes manifests (contain populated secrets)
 k8s/generated/
+k8s-multi/generated/
 
 # Runtime data
 data/

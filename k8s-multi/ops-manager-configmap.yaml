@@ -1,0 +1,26 @@
+# =============================================================================
+# Ops Manager Connection ConfigMap
+# =============================================================================
+#
+# This ConfigMap contains the connection details for MongoDB Ops Manager.
+# The MongoDB Enterprise Kubernetes Operator uses these values to connect
+# to Ops Manager and register/manage MongoDB deployments.
+#
+# Apply with: kubectl apply -f ops-manager-configmap.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ops-manager-connection
+  namespace: mongodb-rs
+  labels:
+    app.kubernetes.io/name: ops-manager-connection
+    app.kubernetes.io/component: ops-manager-connection
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
+data:
+  baseUrl: "{{BASE_URL}}"
+  projectName: "{{PROJECT_NAME}}"
+  orgId: "{{ORG_ID}}"
+  sslMMSCAConfigMap: "ops-manager-ca"
+  sslRequireValidMMSServerCertificates: "{{SSL_REQUIRE_VALID_CERTS}}"

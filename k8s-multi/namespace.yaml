@@ -1,0 +1,19 @@
+# =============================================================================
+# MongoDB Operator Namespace
+# =============================================================================
+#
+# This namespace is used for the MongoDB Enterprise Kubernetes Operator.
+# In multi-cluster deployments, the operator is deployed only to the central
+# cluster and manages MongoDB resources across all member clusters.
+#
+# Apply with: kubectl apply -f namespace.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mongodb
+  labels:
+    app.kubernetes.io/name: mongodb-operator
+    app.kubernetes.io/component: operator-namespace
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi

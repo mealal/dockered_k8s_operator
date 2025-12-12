@@ -1,0 +1,19 @@
+# =============================================================================
+# Kind Cluster Configuration Template
+# =============================================================================
+#
+# This template configures a kind (Kubernetes IN Docker) cluster with
+# NodePort mappings for external access to MongoDB services.
+#
+# Placeholders:
+# - EXTRA_PORT_MAPPINGS: Dynamic port mappings for MongoDB NodePort services
+#
+# Note: This is a kind-specific configuration, not a standard Kubernetes resource.
+# =============================================================================
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+{{EXTRA_PORT_MAPPINGS}}

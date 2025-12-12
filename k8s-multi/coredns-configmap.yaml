@@ -1,0 +1,55 @@
+# =============================================================================
+# CoreDNS ConfigMap for Cross-Cluster DNS Resolution
+# =============================================================================
+#
+# This ConfigMap configures CoreDNS to resolve cross-cluster hostnames
+# for MongoDB multi-cluster deployments:
+#
+# - LOCAL pods: Use 'rewrite' to redirect external domain queries to K8s DNS
+#   (e.g., pod.central.mongodb.local -> pod.central.mongodb-rs.svc.cluster.local)
+#   This ensures DNS stays correct when pods restart and get new IPs.
+#
+# - REMOTE pods: Use static 'hosts' entries with virtual IPs routed via iptables
+#   (e.g., pod.member1.mongodb.local -> 172.19.0.100 -> iptables -> NodePort)
+#
+# Template placeholders (HOSTS_ENTRIES and REWRITE_RULES) are substituted
+# at runtime with cross-cluster DNS configuration.
+#
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: coredns
+    app.kubernetes.io/component: dns
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health {
+           lameduck 5s
+        }
+        ready
+{{REWRITE_RULES}}
+        hosts {
+{{HOSTS_ENTRIES}}
+            fallthrough
+        }
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+           pods insecure
+           fallthrough in-addr.arpa ip6.arpa
+           ttl 30
+        }
+        prometheus :9153
+        forward . /etc/resolv.conf {
+           max_concurrent 1000
+        }
+        cache 30
+        loop
+        reload
+        loadbalance
+    }

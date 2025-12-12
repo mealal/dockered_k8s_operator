@@ -1,0 +1,26 @@
+# =============================================================================
+# Operator Member List ConfigMap
+# =============================================================================
+#
+# This ConfigMap tells the MongoDB Enterprise Kubernetes Operator which
+# Kubernetes clusters are part of the multi-cluster deployment.
+#
+# IMPORTANT: Each cluster name must be a KEY with an empty string value.
+# The operator iterates over all keys in the data section to determine
+# which clusters to manage.
+#
+# Apply with: kubectl apply -f member-list-configmap.yaml (central cluster only)
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongodb-enterprise-operator-member-list
+  namespace: mongodb
+  labels:
+    app.kubernetes.io/name: mongodb-enterprise-operator
+    app.kubernetes.io/component: member-list
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
+    multi-cluster: "true"
+data:
+{{MEMBER_CLUSTER_ENTRIES}}

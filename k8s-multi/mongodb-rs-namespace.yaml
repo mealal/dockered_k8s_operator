@@ -1,0 +1,19 @@
+# =============================================================================
+# MongoDB ReplicaSet Namespace
+# =============================================================================
+#
+# This namespace is used for MongoDB ReplicaSet deployments.
+# In multi-cluster mode, this namespace is created on ALL clusters
+# (both central and member clusters).
+#
+# Apply with: kubectl apply -f mongodb-rs-namespace.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mongodb-rs
+  labels:
+    app.kubernetes.io/name: mongodb-multicluster
+    app.kubernetes.io/component: database-namespace
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi

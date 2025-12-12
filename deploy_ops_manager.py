@@ -221,6 +221,8 @@ def run_command(cmd: List[str], check: bool = True, capture: bool = True,
             cmd,
             capture_output=capture,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             cwd=cwd,
             timeout=timeout
         )
@@ -878,6 +880,9 @@ class OpsManagerConfigurator:
         self.user_id: Optional[str] = None
         self.org_id: Optional[str] = None
         self.project_id: Optional[str] = None
+        # Multi-project support
+        self.single_cluster_project_id: Optional[str] = None
+        self.multi_cluster_project_id: Optional[str] = None
 
         # Cached opener for authenticated requests
         self._auth_opener: Optional[urllib.request.OpenerDirector] = None
@@ -1038,35 +1043,63 @@ class OpsManagerConfigurator:
             except Exception as e:
                 logger.warning(f"Failed to add {cidr} to access list: {e}")
 
-    def create_project(self) -> bool:
-        """Create a project (and organization) using the API key."""
-        if not self.api_public_key or not self.api_private_key:
-            logger.warning("No API key available - cannot create project")
-            return False
-
-        logger.info(f"Creating project: {self.config.project_name}")
-
+    def _create_single_project(self, project_name: str) -> Optional[str]:
+        """Create a single project and return its ID."""
+        logger.info(f"Creating project: {project_name}")
         try:
             result = self._make_authenticated_request(
                 "/api/public/v1.0/groups",
                 method="POST",
-                data={"name": self.config.project_name}
+                data={"name": project_name}
             )
-            self.project_id = result.get("id")
-            self.org_id = result.get("orgId")
-            logger.info(f"Project created: {self.config.project_name} (ID: {self.project_id})")
-            if self.org_id:
-                logger.info(f"Organization ID: {self.org_id}")
-            return True
+            project_id = result.get("id")
+            org_id = result.get("orgId")
+            logger.info(f"Project created: {project_name} (ID: {project_id})")
+            if org_id and not self.org_id:
+                self.org_id = org_id
+                logger.info(f"Organization ID: {org_id}")
+            return project_id
         except urllib.error.HTTPError as e:
             if e.code == 409:
-                logger.info(f"Project '{self.config.project_name}' already exists")
-                return True
+                logger.info(f"Project '{project_name}' already exists")
+                # Try to get existing project ID
+                return self._get_project_id_by_name(project_name)
             logger.error(f"Project creation failed: {e}")
+            return None
+
+    def _get_project_id_by_name(self, project_name: str) -> Optional[str]:
+        """Get project ID by name."""
+        try:
+            result = self._make_authenticated_request("/api/public/v1.0/groups")
+            for group in result.get("results", []):
+                if group.get("name") == project_name:
+                    return group.get("id")
+        except Exception as e:
+            logger.warning(f"Could not fetch project ID for {project_name}: {e}")
+        return None
+
+    def create_projects(self) -> bool:
+        """Create both SingleCluster and MultiCluster projects."""
+        if not self.api_public_key or not self.api_private_key:
+            logger.warning("No API key available - cannot create projects")
             return False
 
+        # Create SingleCluster project
+        self.single_cluster_project_id = self._create_single_project("SingleCluster")
+        # Create MultiCluster project
+        self.multi_cluster_project_id = self._create_single_project("MultiCluster")
+
+        # For backwards compatibility, set project_id to SingleCluster
+        self.project_id = self.single_cluster_project_id
+
+        return bool(self.single_cluster_project_id and self.multi_cluster_project_id)
+
+    def create_project(self) -> bool:
+        """Create projects - creates both SingleCluster and MultiCluster by default."""
+        return self.create_projects()
+
     def save_api_key(self, filepath: str = "./ops-manager-api-key.json") -> bool:
-        """Save the API key and credentials to a file."""
+        """Save the API key and credentials to a file with both projects."""
         if not self.api_public_key or not self.api_private_key:
             logger.warning("No API key to save")
             return False
@@ -1078,8 +1111,20 @@ class OpsManagerConfigurator:
             "username": self.config.admin_username,
             "password": self.config.admin_password,
             "orgId": self.org_id,
-            "projectId": self.project_id,
-            "projectName": self.config.project_name
+            # Include both projects
+            "projects": {
+                "singleCluster": {
+                    "projectId": self.single_cluster_project_id,
+                    "projectName": "SingleCluster"
+                },
+                "multiCluster": {
+                    "projectId": self.multi_cluster_project_id,
+                    "projectName": "MultiCluster"
+                }
+            },
+            # Default project for backwards compatibility
+            "projectId": self.single_cluster_project_id,
+            "projectName": "SingleCluster"
         }
 
         try:
@@ -1094,11 +1139,19 @@ class OpsManagerConfigurator:
     def configure_all(self, api_key_file: str = "./ops-manager-api-key.json") -> DeploymentResult:
         """Run complete initial configuration."""
         try:
+            api_key_path = Path(api_key_file)
+
             self.wait_for_ops_manager()
+
             user_created = self.create_first_user()
             project_created = self.create_project() if self.api_public_key else False
 
             if self.api_public_key:
+                # Delete existing credentials file only AFTER configuration succeeds
+                # This preserves old credentials if configuration fails
+                if api_key_path.exists():
+                    api_key_path.unlink()
+                    logger.info(f"Removed existing credentials file: {api_key_file}")
                 self.save_api_key(api_key_file)
 
             # Print summary
@@ -1134,8 +1187,12 @@ class OpsManagerConfigurator:
             print()
         if self.org_id:
             print(f"Organization ID: {self.org_id}")
-        if self.project_id:
-            print(f"Project: {self.config.project_name} (ID: {self.project_id})")
+        print()
+        print("Projects Created:")
+        if self.single_cluster_project_id:
+            print(f"  SingleCluster: {self.single_cluster_project_id}")
+        if self.multi_cluster_project_id:
+            print(f"  MultiCluster:  {self.multi_cluster_project_id}")
         print()
         print("Configuration applied via conf-mms.properties:")
         print("  - mms.ignoreInitialUiSetup=true")
@@ -1211,6 +1268,8 @@ Examples:
                               help="Admin password (auto-generated if not provided)")
     admin_group.add_argument("--org-name", default="Default", help="Organization name")
     admin_group.add_argument("--project-name", default="Default", help="Project name")
+    admin_group.add_argument("--api-key-file", default="./ops-manager-api-key.json",
+                              help="Path to save API key credentials (default: ./ops-manager-api-key.json)")
     admin_group.add_argument("--email-domain", default="localhost.local", help="Email domain")
 
     # Data persistence options
@@ -1329,7 +1388,7 @@ Examples:
             logger.info(f"     - Create admin user: {om_config.admin_username}")
             logger.info(f"     - Create organization: {om_config.org_name}")
             logger.info(f"     - Create project: {om_config.project_name}")
-            logger.info(f"     - Save API key to: ./ops-manager-api-key.json")
+            logger.info(f"     - Save API key to: {args.api_key_file}")
         logger.info("=== END DRY-RUN ===")
         return
 
@@ -1374,7 +1433,7 @@ Examples:
     if not args.skip_config:
         configurator = OpsManagerConfigurator(om_config)
         try:
-            configurator.configure_all()
+            configurator.configure_all(api_key_file=args.api_key_file)
         except Exception as e:
             logger.error(f"Configuration failed: {e}")
             print(f"\nYou can complete setup manually at: https://{args.hostname}:{args.https_port}")

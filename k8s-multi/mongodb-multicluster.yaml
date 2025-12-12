@@ -1,0 +1,104 @@
+# =============================================================================
+# MongoDB Multi-Cluster ReplicaSet Deployment
+# =============================================================================
+#
+# This file defines a MongoDBMultiCluster resource managed by the MongoDB
+# Enterprise Kubernetes Operator. The operator will:
+#   1. Register this deployment with Ops Manager
+#   2. Deploy MongoDB pods across multiple Kubernetes clusters
+#   3. Configure cross-cluster connectivity via external domains
+#   4. Manage the replica set through Ops Manager
+#
+# Architecture:
+#   - Central cluster: Hosts the operator and some replica set members
+#   - Member cluster(s): Host additional replica set members
+#
+# Security features are ALWAYS enabled:
+#   - TLS encryption for all connections
+#   - SCRAM authentication
+#   - External connectivity via NodePort
+#
+# Prerequisites:
+#   1. MongoDB Enterprise Kubernetes Operator installed (central cluster only)
+#   2. Ops Manager credentials secret created
+#   3. Ops Manager connection ConfigMap created
+#   4. Kubeconfig secret for multi-cluster access
+#   5. TLS certificate secrets created on all clusters
+#
+# Apply with: kubectl apply -f mongodb-multicluster.yaml (central cluster only)
+# =============================================================================
+
+apiVersion: mongodb.com/v1
+kind: MongoDBMultiCluster
+metadata:
+  name: {{REPLICA_SET_NAME}}
+  namespace: mongodb-rs
+  labels:
+    app.kubernetes.io/name: mongodb-multicluster
+    app.kubernetes.io/component: database
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
+spec:
+  version: "7.0.25-ent"
+  type: ReplicaSet
+
+  opsManager:
+    configMapRef:
+      name: ops-manager-connection
+
+  credentials: ops-manager-admin-key
+
+  clusterSpecList:
+    - clusterName: {{CENTRAL_CLUSTER_NAME}}
+      members: {{CENTRAL_MEMBERS}}
+      externalAccess:
+        externalDomain: {{CENTRAL_EXTERNAL_DOMAIN}}
+        externalService:
+          spec:
+            type: NodePort
+            port: 27017
+
+    - clusterName: {{MEMBER_CLUSTER_NAME}}
+      members: {{MEMBER_MEMBERS}}
+      externalAccess:
+        externalDomain: {{MEMBER_EXTERNAL_DOMAIN}}
+        externalService:
+          spec:
+            type: NodePort
+            port: 27017
+
+  agent:
+    startupOptions:
+      tlsRequireValidMMSServerCertificates: "{{TLS_REQUIRE_VALID_CERTS}}"
+
+  persistent: true
+
+  podSpec:
+    podTemplate:
+      spec:
+        containers:
+          - name: mongodb-enterprise-database
+            env:
+              - name: SSL_REQUIRE_VALID_MMS_CERTIFICATES
+                value: "{{SSL_REQUIRE_VALID_MMS_CERTS}}"
+            resources:
+              requests:
+                cpu: "500m"
+                memory: "1Gi"
+              limits:
+                cpu: "1"
+                memory: "2Gi"
+
+    persistence:
+      single:
+        storage: "5Gi"
+
+  security:
+    certsSecretPrefix: mongodb
+    tls:
+      ca: mongodb-ca
+    authentication:
+      enabled: true
+      modes: ["SCRAM"]
+      agents:
+        mode: SCRAM
+      ignoreUnknownUsers: true

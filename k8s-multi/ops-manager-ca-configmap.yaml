@@ -1,0 +1,23 @@
+# =============================================================================
+# Ops Manager CA Certificate ConfigMap
+# =============================================================================
+#
+# This ConfigMap contains the CA certificate used to verify the Ops Manager
+# server certificate. Required when Ops Manager uses a self-signed or
+# private CA certificate.
+#
+# Apply with: kubectl apply -f ops-manager-ca-configmap.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ops-manager-ca
+  namespace: mongodb-rs
+  labels:
+    app.kubernetes.io/name: ops-manager-ca
+    app.kubernetes.io/component: certificate
+    app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
+data:
+  mms-ca.crt: |
+    {{CA_CERTIFICATE}}

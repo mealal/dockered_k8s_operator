@@ -14,24 +14,52 @@ Before starting, ensure you have:
 6. **Ops Manager API credentials** (public key, private key, org ID, project ID)
 7. **CA certificate** from Ops Manager (if using self-signed certificates)
 
+### Verify Prerequisites
+
+Run these commands to verify your environment is ready:
+
+```bash
+# Check Docker is running
+docker version
+
+# Check kubectl (optional - can use Docker-based kubectl)
+kubectl version --client
+
+# Check OpenSSL
+openssl version
+
+# Verify Ops Manager is accessible (adjust URL as needed)
+curl -k https://localhost:8443/user/login
+```
+
+Expected output shows version numbers for each tool. If any command fails, install the missing component before proceeding.
+
 ## Directory Structure
 
 ```
 koperator_poc/
+│
+│   ### Source Files (in version control) ###
+│
 ├── k8s/                              # Kubernetes YAML templates
 │   ├── namespace.yaml                # Operator namespace
 │   ├── mongodb-rs-namespace.yaml     # Replica set namespace
 │   ├── ops-manager-secret.yaml       # API credentials secret template
-│   ├── ops-manager-configmap.yaml    # Ops Manager connection config
-│   ├── ops-manager-ca-configmap.yaml # Ops Manager CA certificate
-│   ├── operator-rbac.yaml            # Operator RBAC for RS namespace
-│   ├── database-roles.yaml           # Database pod service accounts
+│   ├── ops-manager-configmap.yaml    # Ops Manager connection config template
+│   ├── ops-manager-ca-configmap.yaml # Ops Manager CA certificate template
+│   ├── operator-rbac.yaml            # Operator RBAC template
+│   ├── database-roles.yaml           # Database pod service accounts template
 │   ├── mongodb-replicaset.yaml       # MongoDB ReplicaSet definition
 │   ├── mongodb-user.yaml             # SCRAM user template
-│   ├── mongodb-user-secret.yaml      # User password secret
+│   ├── mongodb-user-secret.yaml      # User password secret template
 │   ├── mongodb-x509-user.yaml        # X509 user template
-│   ├── mongodb-ca-configmap.yaml     # MongoDB CA certificate
-│   └── generated/                    # Auto-generated YAML files (by script)
+│   └── mongodb-ca-configmap.yaml     # MongoDB CA certificate template
+├── shared/                           # Python utilities module
+│   └── ...                           # Shared code for deployment scripts
+│
+│   ### Runtime-Generated (created by scripts, not in version control) ###
+│
+├── k8s/generated/                    # Processed YAML files with placeholders filled
 ├── certs/                            # TLS certificates
 │   ├── ca.crt                        # CA certificate
 │   ├── ca.key                        # CA private key
@@ -42,9 +70,15 @@ koperator_poc/
 │       ├── client.key                # Client private key
 │       └── client.pem                # Combined client cert+key
 ├── .kube/                            # Kubeconfig directory
+│   ├── kind.exe                      # Kind binary (downloaded if missing)
 │   └── config                        # Kubeconfig file for kind cluster
-└── ops-manager-api-key.json          # Ops Manager credentials (generated)
+└── ops-manager-api-key.json          # Ops Manager credentials
 ```
+
+> **Note**: Files in `k8s/` are templates containing placeholders like `{{VARIABLE}}`.
+> The deployment script processes these templates and writes the results to `k8s/generated/`.
+> Runtime-generated directories (`certs/`, `.kube/`, `k8s/generated/`) are excluded from
+> version control via `.gitignore`.
 
 ## Step 1: Deploy Ops Manager (if not already running)
 
@@ -581,6 +615,28 @@ kubectl --kubeconfig .kube/config delete -f k8s/
 kind delete cluster --name mongodb-k8s
 ```
 
+### Verify Cleanup
+
+After running cleanup, verify everything was removed:
+
+```bash
+# Verify kind cluster is deleted
+kind get clusters
+# Should not show "mongodb-k8s"
+
+# Verify Docker containers are removed
+docker ps -a | grep mongodb-k8s
+# Should return empty
+
+# Verify generated files (optional - remove if you want a fresh start)
+ls -la .kube/
+ls -la k8s/generated/
+ls -la certs/
+
+# Clean generated files for fresh start
+rm -rf .kube/ k8s/generated/ certs/
+```
+
 ## Automated Deployment
 
 For automated deployment, use the provided script:
@@ -609,12 +665,17 @@ python deploy_mongodb_k8s.py --cleanup
 
 The script will:
 1. Create the kind cluster with port mappings (extracted from template)
-2. Generate YAML files from templates in `k8s/` to `k8s/generated/`
-3. Generate TLS certificates
-4. Apply all configurations
+2. Process YAML templates from `k8s/` and write results to `k8s/generated/`
+3. Generate TLS certificates in `certs/`
+4. Apply all configurations to the cluster
 5. Deploy the MongoDB replica set with authentication and TLS
 6. Create SCRAM and X509 users
 7. Optionally wait for deployment to complete
+
+> **Template Processing**: The script reads templates from `k8s/` (e.g., `ops-manager-secret.yaml`),
+> replaces placeholders like `{{PUBLIC_KEY}}` with actual values, and writes the processed
+> files to `k8s/generated/`. When deploying manually, you must either process these templates
+> yourself or use the generated files after running the script once.
 
 > **Note**: To customize member count, MongoDB version, ports, or resources,
 > edit `k8s/mongodb-replicaset.yaml` directly. The script extracts these values
