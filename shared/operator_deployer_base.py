@@ -14,13 +14,14 @@ from shared.decorators import retry_with_backoff
 from shared.models import OpsManagerCredentials
 from shared.k8s_manager_base import BaseKubernetesManager
 from shared.yaml_manager_base import BaseYAMLTemplateManager
+from shared import constants
 
 logger = logging.getLogger(__name__)
 
-# Official MongoDB Enterprise Kubernetes Operator URLs
-OPERATOR_CRDS_URL = "https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/crds.yaml"
-OPERATOR_INSTALL_URL = "https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/mongodb-enterprise.yaml"
-OPERATOR_MULTI_CLUSTER_URL = "https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/mongodb-enterprise-multi-cluster.yaml"
+# Official MongoDB Enterprise Kubernetes Operator URLs - imported from constants
+OPERATOR_CRDS_URL = constants.OPERATOR_CRDS_URL
+OPERATOR_INSTALL_URL = constants.OPERATOR_INSTALL_URL
+OPERATOR_MULTI_CLUSTER_URL = constants.OPERATOR_MULTI_CLUSTER_URL
 
 
 class BaseOperatorDeployer:
@@ -137,7 +138,7 @@ class BaseOperatorDeployer:
         yaml_path = self.yaml_manager.render_configmap(
             namespace=self.rs_namespace,
             base_url=self.ops_manager_url,
-            project_name=self.credentials.project_name,
+            project_id=self.credentials.project_id,
             org_id=self.credentials.org_id,
             ssl_require_valid_certs=not self.ssl_skip_verify
         )

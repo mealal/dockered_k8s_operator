@@ -20,7 +20,10 @@ metadata:
     app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
 data:
   baseUrl: "{{BASE_URL}}"
+  # Project name (required) - operator uses this to find/create project
   projectName: "{{PROJECT_NAME}}"
+  # Project ID (for reference)
+  projectId: "{{PROJECT_ID}}"
   orgId: "{{ORG_ID}}"
   sslMMSCAConfigMap: "ops-manager-ca"
-  sslRequireValidMMSServerCertificates: "{{SSL_REQUIRE_VALID_CERTS}}"
+  sslRequireValidMMSServerCertificates: "false"

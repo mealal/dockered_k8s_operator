@@ -13,8 +13,8 @@
 #   - Central cluster: Hosts the operator and some replica set members
 #   - Member cluster(s): Host additional replica set members
 #
-# Security features are ALWAYS enabled:
-#   - TLS encryption for all connections
+# Security features:
+#   - TLS encryption for all connections (can be disabled with --no-tls)
 #   - SCRAM authentication
 #   - External connectivity via NodePort
 #
@@ -31,7 +31,7 @@
 apiVersion: mongodb.com/v1
 kind: MongoDBMultiCluster
 metadata:
-  name: {{REPLICA_SET_NAME}}
+  name: mongodb-multi-rs
   namespace: mongodb-rs
   labels:
     app.kubernetes.io/name: mongodb-multicluster
@@ -66,9 +66,16 @@ spec:
             type: NodePort
             port: 27017
 
+  # Split-horizon DNS configuration for external client access
+  # Maps internal pod hostnames to external localhost:NodePort addresses
+  # This allows external clients (mongosh from host) to connect using localhost ports
+  # Order must match: central cluster members first, then member cluster members
+  connectivity:
+    replicaSetHorizons:
+{{REPLICA_SET_HORIZONS}}
   agent:
     startupOptions:
-      tlsRequireValidMMSServerCertificates: "{{TLS_REQUIRE_VALID_CERTS}}"
+      tlsRequireValidMMSServerCertificates: "false"
 
   persistent: true
 
@@ -79,7 +86,7 @@ spec:
           - name: mongodb-enterprise-database
             env:
               - name: SSL_REQUIRE_VALID_MMS_CERTIFICATES
-                value: "{{SSL_REQUIRE_VALID_MMS_CERTS}}"
+                value: "false"
             resources:
               requests:
                 cpu: "500m"
@@ -93,12 +100,10 @@ spec:
         storage: "5Gi"
 
   security:
-    certsSecretPrefix: mongodb
-    tls:
-      ca: mongodb-ca
+{{TLS_SECURITY_SECTION}}
     authentication:
       enabled: true
-      modes: ["SCRAM"]
+      modes: ["SCRAM", "X509"]
       agents:
         mode: SCRAM
       ignoreUnknownUsers: true

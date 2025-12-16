@@ -6,7 +6,9 @@ This script:
 1. Generates a custom CA and server certificates using OpenSSL
 2. Builds a custom Docker image with MongoDB Ops Manager
 3. Deploys MongoDB Ops Manager in a Docker container with HTTPS configured
-4. Creates initial admin user, organization, and project
+4. Creates initial admin user, organization, and API key
+
+Projects are created by K8s deployment scripts on demand, not by this setup.
 
 The script downloads the Ops Manager RPM from MongoDB's official repository
 and builds a custom Docker image with HTTPS support.
@@ -27,10 +29,77 @@ import shutil
 import secrets
 import string
 import hashlib
+import os
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional, Tuple, Dict, Any, List
 from functools import wraps
+
+# Import shared utilities for consistency
+from shared.ui_utils import mask_password, format_error_with_suggestion
+
+
+def find_openssl() -> str:
+    """Find OpenSSL executable, checking common Windows paths.
+
+    Returns:
+        Path to openssl executable
+
+    Raises:
+        FileNotFoundError: If OpenSSL cannot be found
+    """
+    # First try if openssl is directly in PATH
+    openssl_cmd = "openssl"
+
+    # On Windows, check common installation paths
+    if sys.platform == "win32":
+        common_paths = [
+            # Git for Windows (most common)
+            r"C:\Program Files\Git\mingw64\bin\openssl.exe",
+            r"C:\Program Files\Git\usr\bin\openssl.exe",
+            r"C:\Program Files (x86)\Git\mingw64\bin\openssl.exe",
+            # Standalone OpenSSL installations
+            r"C:\OpenSSL-Win64\bin\openssl.exe",
+            r"C:\OpenSSL-Win32\bin\openssl.exe",
+            r"C:\Program Files\OpenSSL-Win64\bin\openssl.exe",
+            # Chocolatey
+            r"C:\ProgramData\chocolatey\bin\openssl.exe",
+        ]
+
+        for path in common_paths:
+            if os.path.isfile(path):
+                return path
+
+        # Try to find via where command
+        try:
+            result = subprocess.run(
+                ["where", "openssl"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().split('\n')[0]
+        except Exception:
+            pass
+
+    # On non-Windows or if all else fails, assume it's in PATH
+    # Verify it works
+    try:
+        subprocess.run(
+            [openssl_cmd, "version"],
+            capture_output=True, check=True, timeout=10
+        )
+        return openssl_cmd
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        raise FileNotFoundError(
+            "OpenSSL not found. Please install OpenSSL:\n"
+            "  - Windows: Install Git for Windows (includes OpenSSL) or download from https://slproweb.com/products/Win32OpenSSL.html\n"
+            "  - Linux: sudo apt-get install openssl\n"
+            "  - macOS: brew install openssl"
+        )
+
+
+# Global OpenSSL path (resolved once at module load)
+OPENSSL_PATH: Optional[str] = None
 
 # Configure logging
 logging.basicConfig(
@@ -84,7 +153,6 @@ class OpsManagerConfig:
     admin_username: str = "admin"
     admin_password: Optional[str] = None  # Auto-generated if not provided
     org_name: str = "Default"
-    project_name: str = "Default"
     email_domain: str = "localhost.local"
     smtp_hostname: str = "localhost"
     smtp_port: int = 25
@@ -251,10 +319,20 @@ class CertificateGenerator:
         self.server_csr = self.output_dir / "server.csr"
         self.server_cert = self.output_dir / "server.crt"
         self.server_pem = self.output_dir / "server.pem"
+        self._openssl_path: Optional[str] = None
+
+    def _get_openssl(self) -> str:
+        """Get the OpenSSL executable path, caching the result."""
+        global OPENSSL_PATH
+        if OPENSSL_PATH is None:
+            OPENSSL_PATH = find_openssl()
+            logger.debug(f"Using OpenSSL at: {OPENSSL_PATH}")
+        return OPENSSL_PATH
 
     def _run_openssl(self, args: List[str]) -> subprocess.CompletedProcess:
         """Run an OpenSSL command."""
-        return run_command(["openssl"] + args)
+        openssl = self._get_openssl()
+        return run_command([openssl] + args)
 
     def setup_output_directory(self) -> None:
         """Create the output directory if it doesn't exist."""
@@ -415,192 +493,43 @@ class OpsManagerImageBuilder:
         self.rpm_url = rpm_url
         self._cached_rpm = self.build_dir / "mongodb-mms.rpm"
 
-    def create_dockerfile(self) -> Path:
-        """Create Dockerfile for Ops Manager with HTTPS support."""
+    def _verify_build_files(self) -> bool:
+        """Verify that required build files exist.
+
+        The Dockerfile and entrypoint.sh are version-controlled static files
+        in the docker-build/ directory. This method verifies they exist.
+
+        Returns:
+            True if all required files exist, False otherwise.
+        """
         dockerfile_path = self.build_dir / "Dockerfile"
-
-        if self.rpm_path and self.rpm_path.exists():
-            rpm_install = """# Install MongoDB Ops Manager from local RPM
-COPY mongodb-mms.rpm /tmp/mongodb-mms.rpm
-RUN rpm -ivh /tmp/mongodb-mms.rpm && rm -f /tmp/mongodb-mms.rpm"""
-        else:
-            rpm_install = f"""# Download and install MongoDB Ops Manager
-RUN curl -fSL "{self.rpm_url}" -o /tmp/mongodb-mms.rpm \\
-    && rpm -ivh /tmp/mongodb-mms.rpm \\
-    && rm -f /tmp/mongodb-mms.rpm"""
-
-        dockerfile_content = f"""# MongoDB Ops Manager with HTTPS Support
-FROM rockylinux:8
-
-LABEL maintainer="ops-manager-deployer"
-LABEL version="{self.config.version}"
-
-# Install dependencies
-RUN dnf install -y --allowerasing \\
-    curl procps net-tools cyrus-sasl cyrus-sasl-gssapi \\
-    cyrus-sasl-plain krb5-libs libcurl openldap openssl \\
-    ncurses java-11-openjdk-headless \\
-    && dnf clean all
-
-{rpm_install}
-
-# Create directories and set permissions
-RUN mkdir -p /etc/mongodb-mms/certs /data/appdb /data/backup /opt/mongodb/mms/mongodb-releases \\
-    && chown -R mongodb-mms:mongodb-mms /etc/mongodb-mms \\
-    && chown -R mongodb-mms:mongodb-mms /data \\
-    && chown -R mongodb-mms:mongodb-mms /opt/mongodb/mms/conf \\
-    && chown -R mongodb-mms:mongodb-mms /opt/mongodb/mms/mongodb-releases
-
-# Copy entrypoint script
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-# Expose ports
-EXPOSE 8080 8443
-
-# Environment variables
-ENV MMS_HTTPS_PORT=8443
-ENV MMS_HTTP_PORT=8080
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \\
-    CMD curl -k -f https://localhost:8443/user/login || exit 1
-
-# Volumes for persistence
-VOLUME ["/data/appdb", "/data/backup", "/opt/mongodb/mms/logs"]
-
-# Run as mongodb-mms user
-USER mongodb-mms
-
-ENTRYPOINT ["/entrypoint.sh"]
-"""
-        dockerfile_path.write_text(dockerfile_content)
-        logger.info(f"Created Dockerfile: {dockerfile_path}")
-        return dockerfile_path
-
-    def create_entrypoint(self) -> Path:
-        """Create entrypoint script for the container."""
         entrypoint_path = self.build_dir / "entrypoint.sh"
 
-        entrypoint_content = '''#!/bin/bash
-set -e
+        if not dockerfile_path.exists():
+            raise FileNotFoundError(
+                f"Dockerfile not found at {dockerfile_path}. "
+                f"Ensure the docker-build/ directory contains the required files."
+            )
 
-CONFIG_FILE="/opt/mongodb/mms/conf/conf-mms.properties"
-CERT_DIR="/etc/mongodb-mms/certs"
+        if not entrypoint_path.exists():
+            raise FileNotFoundError(
+                f"entrypoint.sh not found at {entrypoint_path}. "
+                f"Ensure the docker-build/ directory contains the required files."
+            )
 
-# Function to update or add a property in the config file
-update_config() {
-    local key="$1"
-    local value="$2"
-    if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${value}|" "$CONFIG_FILE"
-    else
-        echo "${key}=${value}" >> "$CONFIG_FILE"
-    fi
-}
-
-echo "Configuring MongoDB Ops Manager..."
-
-# Skip initial UI setup wizard
-update_config "mms.ignoreInitialUiSetup" "true"
-
-# Email configuration (required)
-FROM_EMAIL="${MMS_FROM_EMAIL:-ops-manager@${MMS_EMAIL_DOMAIN:-localhost.local}}"
-REPLY_EMAIL="${MMS_REPLY_EMAIL:-ops-manager@${MMS_EMAIL_DOMAIN:-localhost.local}}"
-ADMIN_EMAIL="${MMS_ADMIN_EMAIL:-admin@${MMS_EMAIL_DOMAIN:-localhost.local}}"
-
-update_config "mms.fromEmailAddr" "$FROM_EMAIL"
-update_config "mms.replyToEmailAddr" "$REPLY_EMAIL"
-update_config "mms.adminEmailAddr" "$ADMIN_EMAIL"
-
-# SMTP configuration
-update_config "mms.mail.transport" "smtp"
-update_config "mms.mail.hostname" "${MMS_SMTP_HOSTNAME:-localhost}"
-update_config "mms.mail.port" "${MMS_SMTP_PORT:-25}"
-
-# User registration settings
-update_config "mms.user.bypassInviteForExistingUsers" "true"
-update_config "mms.userSvcClass" "com.xgen.svc.mms.svc.user.UserSvcDb"
-update_config "mms.user.invitationOnly" "false"
-
-# Disable API access list requirement for Kubernetes operator connectivity
-# This allows API calls from any IP address without whitelist restrictions
-update_config "mms.publicApi.whitelistEnabled" "false"
-
-# Configure Hybrid Mode for MongoDB binary downloads
-# In Hybrid Mode, Ops Manager downloads binaries from the internet and serves them to agents
-# This allows agents without internet access to get binaries from Ops Manager
-update_config "automation.versions.source" "hybrid"
-
-# Configure the directory where Ops Manager stores MongoDB binaries
-update_config "automation.versions.directory" "/opt/mongodb/mms/mongodb-releases/"
-
-echo "Email configuration completed"
-echo "Hybrid Mode enabled: Agents will download MongoDB binaries from Ops Manager"
-
-# HTTPS configuration
-if [ -f "${CERT_DIR}/server.pem" ] && [ -f "${CERT_DIR}/ca.crt" ]; then
-    echo "Configuring HTTPS..."
-    update_config "mms.https.PEMKeyFile" "${CERT_DIR}/server.pem"
-    update_config "mms.https.CAFile" "${CERT_DIR}/ca.crt"
-    update_config "mms.https.ClientCertificateMode" "None"
-    if [ -n "$MMS_HTTPS_PORT" ]; then
-        update_config "BASE_PORT" "${MMS_HTTPS_PORT}"
-    fi
-fi
-
-# Database configuration
-if [ -n "$MONGO_URI" ]; then
-    update_config "mongo.mongoUri" "$MONGO_URI"
-    echo "MongoDB URI configured"
-fi
-
-# Central URL
-if [ -n "$MMS_CENTRAL_URL" ]; then
-    update_config "mms.centralUrl" "$MMS_CENTRAL_URL"
-fi
-
-# Encryption key
-if [ -n "$MMS_ENCRYPTION_KEY" ]; then
-    update_config "mongodb.encryption.key" "$MMS_ENCRYPTION_KEY"
-else
-    RANDOM_KEY=$(openssl rand -base64 24)
-    update_config "mongodb.encryption.key" "$RANDOM_KEY"
-fi
-
-# Gen key
-if [ -n "$MMS_GEN_KEY" ]; then
-    update_config "mms.genKey" "$MMS_GEN_KEY"
-fi
-
-echo ""
-echo "=========================================="
-echo "Ops Manager Configuration Summary:"
-echo "=========================================="
-echo "Skip UI Setup Wizard: true"
-echo "From Email: $FROM_EMAIL"
-echo "SMTP Host: ${MMS_SMTP_HOSTNAME:-localhost}"
-echo "Central URL: ${MMS_CENTRAL_URL:-not set}"
-echo "=========================================="
-echo ""
-
-echo "Starting MongoDB Ops Manager..."
-/opt/mongodb/mms/bin/mongodb-mms start
-
-echo "Ops Manager started. Tailing logs..."
-tail -f /opt/mongodb/mms/logs/mms0.log
-'''
-        # Write with Unix line endings
-        with open(entrypoint_path, 'w', newline='\n') as f:
-            f.write(entrypoint_content)
-        logger.info(f"Created entrypoint script: {entrypoint_path}")
-        return entrypoint_path
+        logger.debug(f"Build files verified: {dockerfile_path}, {entrypoint_path}")
+        return True
 
     def build_image(self, no_cache: bool = False) -> str:
-        """Build the Docker image."""
+        """Build the Docker image.
+
+        Uses the static Dockerfile and entrypoint.sh from the docker-build/
+        directory. These files are version-controlled and not regenerated.
+        """
         logger.info(f"Building Docker image: {self.image_tag}")
 
-        self.build_dir.mkdir(parents=True, exist_ok=True)
+        # Verify build files exist (they are version-controlled, not generated)
+        self._verify_build_files()
 
         # Copy RPM if provided
         if self.rpm_path and self.rpm_path.exists():
@@ -608,9 +537,6 @@ tail -f /opt/mongodb/mms/logs/mms0.log
             logger.info(f"Using local RPM: {self.rpm_path}")
         else:
             logger.info(f"Will download RPM from: {self.rpm_url}")
-
-        self.create_dockerfile()
-        self.create_entrypoint()
 
         build_cmd = [
             "docker", "build",
@@ -767,11 +693,42 @@ class OpsManagerDeployer:
         logger.info(f"MongoDB releases cached in: {releases_dir}")
 
     def cleanup(self) -> None:
-        """Remove all deployed containers and network."""
+        """Remove all deployed containers, network, certificates, and data."""
+        import shutil
+
         logger.info("Cleaning up...")
         self._run_docker(["rm", "-f", self.config.container_name], check=False)
         self._run_docker(["rm", "-f", self.appdb_config.container_name], check=False)
         self._run_docker(["network", "rm", self.config.network_name], check=False)
+
+        # Delete all certificates
+        if self.cert_dir.exists():
+            for item in self.cert_dir.iterdir():
+                if item.is_file():
+                    item.unlink()
+                    logger.debug(f"Deleted certificate: {item}")
+                elif item.is_dir():
+                    shutil.rmtree(item)
+                    logger.debug(f"Deleted certificate directory: {item}")
+            logger.info(f"Deleted certificates in: {self.cert_dir}")
+
+        # Delete data directory (gen.key, mongodb-releases, etc.)
+        if self.data_dir.exists():
+            for item in self.data_dir.iterdir():
+                if item.is_file():
+                    item.unlink()
+                    logger.debug(f"Deleted data file: {item}")
+                elif item.is_dir():
+                    shutil.rmtree(item)
+                    logger.debug(f"Deleted data directory: {item}")
+            logger.info(f"Deleted data files in: {self.data_dir}")
+
+        # Delete API key JSON file
+        api_key_file = Path("./ops-manager-api-key.json")
+        if api_key_file.exists():
+            api_key_file.unlink()
+            logger.info(f"Deleted API key file: {api_key_file}")
+
         logger.info("Cleanup complete")
 
     def deploy_all(self) -> None:
@@ -879,10 +836,6 @@ class OpsManagerConfigurator:
         self.api_private_key: Optional[str] = None
         self.user_id: Optional[str] = None
         self.org_id: Optional[str] = None
-        self.project_id: Optional[str] = None
-        # Multi-project support
-        self.single_cluster_project_id: Optional[str] = None
-        self.multi_cluster_project_id: Optional[str] = None
 
         # Cached opener for authenticated requests
         self._auth_opener: Optional[urllib.request.OpenerDirector] = None
@@ -953,9 +906,11 @@ class OpsManagerConfigurator:
         logger.info("Waiting for Ops Manager to be ready...")
         start_time = time.time()
 
+        health_check_url = f"https://{self.config.hostname}:{self.config.https_port}/user/login"
+
         while time.time() - start_time < timeout:
             try:
-                req = urllib.request.Request(f"{self.base_url}/user/login")
+                req = urllib.request.Request(health_check_url)
                 with urllib.request.urlopen(req, context=self.ssl_context, timeout=10) as response:
                     if response.status in [200, 302, 303]:
                         logger.info("Ops Manager is ready!")
@@ -990,6 +945,7 @@ class OpsManagerConfigurator:
                 data=user_data
             )
             logger.info("Admin user created successfully!")
+            logger.debug(f"User creation response: {result}")
 
             # Extract API key
             if "programmaticApiKey" in result:
@@ -1003,12 +959,16 @@ class OpsManagerConfigurator:
                 if self.api_public_key:
                     logger.info(f"API Key obtained: {self.api_public_key}")
 
+            # Extract user ID - may be in "id" or "user.id"
             if "id" in result:
                 self.user_id = result["id"]
+            elif "user" in result and isinstance(result["user"], dict):
+                self.user_id = result["user"].get("id")
+            logger.debug(f"User ID: {self.user_id}")
 
-            # Add IP access list entries for Kubernetes operator connectivity
+            # Create organization (required for K8s scripts to create projects)
             if self.api_public_key:
-                self._configure_api_access_list()
+                self._create_or_get_org()
 
             return True
         except urllib.error.HTTPError as e:
@@ -1017,89 +977,49 @@ class OpsManagerConfigurator:
                 return True
             raise
 
-    def _configure_api_access_list(self) -> None:
-        """Configure API access list to allow connections from Docker/Kubernetes networks."""
-        logger.info("Configuring API access list for Kubernetes operator...")
-
-        # Add common Docker and Kubernetes network ranges
-        # These ranges cover typical Docker bridge networks and kind cluster networks
-        ip_ranges = [
-            "0.0.0.0/0",  # Allow all IPs (for development/testing)
-        ]
-
-        for cidr in ip_ranges:
-            try:
-                self._make_authenticated_request(
-                    f"/api/public/v1.0/users/{self.user_id}/accessList",
-                    method="POST",
-                    data=[{"cidrBlock": cidr}]
-                )
-                logger.info(f"Added {cidr} to API access list")
-            except urllib.error.HTTPError as e:
-                if e.code == 409:
-                    logger.debug(f"Access list entry {cidr} already exists")
-                else:
-                    logger.warning(f"Failed to add {cidr} to access list: {e}")
-            except Exception as e:
-                logger.warning(f"Failed to add {cidr} to access list: {e}")
-
-    def _create_single_project(self, project_name: str) -> Optional[str]:
-        """Create a single project and return its ID."""
-        logger.info(f"Creating project: {project_name}")
+    def _create_or_get_org(self) -> None:
+        """Create organization or get existing one."""
         try:
+            # First check if org already exists
+            result = self._make_authenticated_request("/api/public/v1.0/orgs")
+            orgs = result.get("results", [])
+            if orgs:
+                self.org_id = orgs[0].get("id")
+                logger.info(f"Using existing organization ID: {self.org_id}")
+                return
+
+            # No org exists, create one
+            logger.info(f"Creating organization: {self.config.org_name}")
             result = self._make_authenticated_request(
-                "/api/public/v1.0/groups",
+                "/api/public/v1.0/orgs",
                 method="POST",
-                data={"name": project_name}
+                data={"name": self.config.org_name}
             )
-            project_id = result.get("id")
-            org_id = result.get("orgId")
-            logger.info(f"Project created: {project_name} (ID: {project_id})")
-            if org_id and not self.org_id:
-                self.org_id = org_id
-                logger.info(f"Organization ID: {org_id}")
-            return project_id
+            self.org_id = result.get("id")
+            logger.info(f"Organization created: {self.config.org_name} (ID: {self.org_id})")
         except urllib.error.HTTPError as e:
             if e.code == 409:
-                logger.info(f"Project '{project_name}' already exists")
-                # Try to get existing project ID
-                return self._get_project_id_by_name(project_name)
-            logger.error(f"Project creation failed: {e}")
-            return None
-
-    def _get_project_id_by_name(self, project_name: str) -> Optional[str]:
-        """Get project ID by name."""
-        try:
-            result = self._make_authenticated_request("/api/public/v1.0/groups")
-            for group in result.get("results", []):
-                if group.get("name") == project_name:
-                    return group.get("id")
+                # Org already exists, try to fetch it
+                logger.info(f"Organization '{self.config.org_name}' already exists")
+                try:
+                    result = self._make_authenticated_request("/api/public/v1.0/orgs")
+                    orgs = result.get("results", [])
+                    if orgs:
+                        self.org_id = orgs[0].get("id")
+                        logger.info(f"Organization ID: {self.org_id}")
+                except Exception:
+                    pass
+            else:
+                logger.warning(f"Could not create organization: {e}")
         except Exception as e:
-            logger.warning(f"Could not fetch project ID for {project_name}: {e}")
-        return None
-
-    def create_projects(self) -> bool:
-        """Create both SingleCluster and MultiCluster projects."""
-        if not self.api_public_key or not self.api_private_key:
-            logger.warning("No API key available - cannot create projects")
-            return False
-
-        # Create SingleCluster project
-        self.single_cluster_project_id = self._create_single_project("SingleCluster")
-        # Create MultiCluster project
-        self.multi_cluster_project_id = self._create_single_project("MultiCluster")
-
-        # For backwards compatibility, set project_id to SingleCluster
-        self.project_id = self.single_cluster_project_id
-
-        return bool(self.single_cluster_project_id and self.multi_cluster_project_id)
-
-    def create_project(self) -> bool:
-        """Create projects - creates both SingleCluster and MultiCluster by default."""
-        return self.create_projects()
+            logger.warning(f"Could not create/fetch organization: {e}")
 
     def save_api_key(self, filepath: str = "./ops-manager-api-key.json") -> bool:
-        """Save the API key and credentials to a file with both projects."""
+        """Save the API key and credentials to a file.
+
+        Note: Projects are created by K8s deployment scripts, not by Ops Manager setup.
+        The K8s scripts will create projects on demand and update this file.
+        """
         if not self.api_public_key or not self.api_private_key:
             logger.warning("No API key to save")
             return False
@@ -1110,21 +1030,7 @@ class OpsManagerConfigurator:
             "baseUrl": self.base_url,
             "username": self.config.admin_username,
             "password": self.config.admin_password,
-            "orgId": self.org_id,
-            # Include both projects
-            "projects": {
-                "singleCluster": {
-                    "projectId": self.single_cluster_project_id,
-                    "projectName": "SingleCluster"
-                },
-                "multiCluster": {
-                    "projectId": self.multi_cluster_project_id,
-                    "projectName": "MultiCluster"
-                }
-            },
-            # Default project for backwards compatibility
-            "projectId": self.single_cluster_project_id,
-            "projectName": "SingleCluster"
+            "orgId": self.org_id
         }
 
         try:
@@ -1136,15 +1042,30 @@ class OpsManagerConfigurator:
             logger.error(f"Failed to save API key: {e}")
             return False
 
-    def configure_all(self, api_key_file: str = "./ops-manager-api-key.json") -> DeploymentResult:
-        """Run complete initial configuration."""
+    def configure_all(
+        self,
+        api_key_file: str = "./ops-manager-api-key.json",
+        show_password: bool = False
+    ) -> DeploymentResult:
+        """Run complete initial configuration.
+
+        Creates admin user, organization, and API key. Projects are created
+        by K8s deployment scripts on demand, not by this setup.
+
+        Args:
+            api_key_file: Path to save API credentials
+            show_password: Whether to show password in output (default: masked)
+        """
         try:
             api_key_path = Path(api_key_file)
 
             self.wait_for_ops_manager()
 
             user_created = self.create_first_user()
-            project_created = self.create_project() if self.api_public_key else False
+
+            # Ensure organization exists (may not be created if user already existed)
+            if self.api_public_key and not self.org_id:
+                self._create_or_get_org()
 
             if self.api_public_key:
                 # Delete existing credentials file only AFTER configuration succeeds
@@ -1155,7 +1076,7 @@ class OpsManagerConfigurator:
                 self.save_api_key(api_key_file)
 
             # Print summary
-            self._print_summary(api_key_file, project_created)
+            self._print_summary(api_key_file, show_password=show_password)
 
             return DeploymentResult(
                 success=user_created,
@@ -1163,21 +1084,28 @@ class OpsManagerConfigurator:
                 api_public_key=self.api_public_key,
                 api_private_key=self.api_private_key,
                 org_id=self.org_id,
-                project_id=self.project_id,
+                project_id=None,
                 base_url=self.base_url
             )
         except Exception as e:
             logger.error(f"Configuration failed: {e}")
             return DeploymentResult(success=False, message=str(e))
 
-    def _print_summary(self, api_key_file: str, project_created: bool) -> None:
-        """Print configuration summary."""
+    def _print_summary(self, api_key_file: str, show_password: bool = False) -> None:
+        """Print configuration summary.
+
+        Args:
+            api_key_file: Path to saved API key file
+            show_password: Whether to show password in plaintext (default: masked)
+        """
+        display_password = self.config.admin_password if show_password else mask_password(self.config.admin_password)
+
         print(f"\n{'='*60}")
         print("INITIAL CONFIGURATION COMPLETE")
         print(f"{'='*60}")
         print(f"URL: {self.base_url}")
         print(f"Username: {self.config.admin_username}")
-        print(f"Password: {self.config.admin_password}")
+        print(f"Password: {display_password}")
         print()
         if self.api_public_key:
             print("Programmatic API Key (GLOBAL_OWNER):")
@@ -1188,20 +1116,13 @@ class OpsManagerConfigurator:
         if self.org_id:
             print(f"Organization ID: {self.org_id}")
         print()
-        print("Projects Created:")
-        if self.single_cluster_project_id:
-            print(f"  SingleCluster: {self.single_cluster_project_id}")
-        if self.multi_cluster_project_id:
-            print(f"  MultiCluster:  {self.multi_cluster_project_id}")
-        print()
         print("Configuration applied via conf-mms.properties:")
         print("  - mms.ignoreInitialUiSetup=true")
         print("  - Email configuration completed")
         print("  - HTTPS certificates configured")
         print("  - MongoDB connection configured")
-        if not project_created:
-            print()
-            print("Note: Organization/project can be created via the UI")
+        print()
+        print("Next step: Run K8s deployment script to create projects")
         print(f"{'='*60}")
 
 
@@ -1224,7 +1145,7 @@ Examples:
   # Build image only
   python deploy_ops_manager.py --build-only
 
-  # Cleanup
+  # Cleanup (removes containers, network, and certificates)
   python deploy_ops_manager.py --cleanup
 
   # With custom credentials
@@ -1266,8 +1187,9 @@ Examples:
     admin_group.add_argument("--admin-username", default="admin", help="Admin username")
     admin_group.add_argument("--admin-password", default=None,
                               help="Admin password (auto-generated if not provided)")
+    admin_group.add_argument("--show-password", action="store_true",
+                              help="Show passwords in output (default: masked)")
     admin_group.add_argument("--org-name", default="Default", help="Organization name")
-    admin_group.add_argument("--project-name", default="Default", help="Project name")
     admin_group.add_argument("--api-key-file", default="./ops-manager-api-key.json",
                               help="Path to save API key credentials (default: ./ops-manager-api-key.json)")
     admin_group.add_argument("--email-domain", default="localhost.local", help="Email domain")
@@ -1291,7 +1213,8 @@ Examples:
     mode_group.add_argument("--skip-config", action="store_true", help="Skip initial configuration")
     mode_group.add_argument("--certs-only", action="store_true", help="Only generate certificates")
     mode_group.add_argument("--build-only", action="store_true", help="Only build Docker image")
-    mode_group.add_argument("--cleanup", action="store_true", help="Remove all containers and exit")
+    mode_group.add_argument("--cleanup", action="store_true",
+                            help="Remove all containers, network, and certificates")
     mode_group.add_argument("--no-cache", action="store_true", help="Build without Docker cache")
     mode_group.add_argument("--config-timeout", type=int, default=300, help="Config timeout (seconds)")
     mode_group.add_argument("--dry-run", action="store_true",
@@ -1337,7 +1260,6 @@ Examples:
         admin_username=args.admin_username,
         admin_password=args.admin_password,  # None triggers auto-generation
         org_name=args.org_name,
-        project_name=args.project_name,
         email_domain=args.email_domain,
         memory_limit=args.memory_limit,
         cpu_limit=args.cpu_limit,
@@ -1387,7 +1309,6 @@ Examples:
             logger.info(f"  6. Configure Ops Manager:")
             logger.info(f"     - Create admin user: {om_config.admin_username}")
             logger.info(f"     - Create organization: {om_config.org_name}")
-            logger.info(f"     - Create project: {om_config.project_name}")
             logger.info(f"     - Save API key to: {args.api_key_file}")
         logger.info("=== END DRY-RUN ===")
         return
@@ -1433,9 +1354,16 @@ Examples:
     if not args.skip_config:
         configurator = OpsManagerConfigurator(om_config)
         try:
-            configurator.configure_all(api_key_file=args.api_key_file)
+            configurator.configure_all(
+                api_key_file=args.api_key_file,
+                show_password=args.show_password
+            )
         except Exception as e:
-            logger.error(f"Configuration failed: {e}")
+            logger.error(format_error_with_suggestion(
+                f"Configuration failed: {e}",
+                "Check Ops Manager container logs for details",
+                f"docker logs {om_config.container_name}"
+            ))
             print(f"\nYou can complete setup manually at: https://{args.hostname}:{args.https_port}")
     else:
         logger.info("Skipping initial configuration (--skip-config)")

@@ -14,8 +14,8 @@
 #   - projectId: Your Ops Manager Project ID (to use existing project)
 #   - orgId: Your Ops Manager Organization ID
 #
-# Note: Use 'projectId' to deploy to an EXISTING project by ID.
-#       Use 'projectName' to create a NEW project by name (not recommended).
+# Note: Both 'projectName' and 'orgId' are required to use an existing project.
+#       The operator uses projectName + orgId to find/create projects.
 #
 # Apply with: kubectl apply -f ops-manager-configmap.yaml
 # =============================================================================
@@ -38,11 +38,13 @@ data:
   # Note: Use host.docker.internal to access host machine from kind cluster
   baseUrl: "{{BASE_URL}}"
 
-  # Ops Manager Project Name
-  # The operator will deploy to an existing project with this name, or create a new one
-  # Find project name in Ops Manager: Settings > Project Settings > Project Name
-  # Note: Use the actual project NAME, not the project ID
+  # Ops Manager Project Name (required)
+  # The operator uses projectName + orgId to find or create the project
   projectName: "{{PROJECT_NAME}}"
+
+  # Ops Manager Project ID (optional, for reference)
+  # If provided along with projectName, helps identify the exact project
+  projectId: "{{PROJECT_ID}}"
 
   # Ops Manager Organization ID
   # Find this in Ops Manager: Settings > Organization Settings > Organization ID
@@ -57,4 +59,4 @@ data:
   # Set to 'false' to allow connections with invalid/mismatched certificates
   # WARNING: Only use 'false' for testing - never in production!
   # Default is 'true' which requires valid certificates
-  sslRequireValidMMSServerCertificates: "{{SSL_REQUIRE_VALID_CERTS}}"
+  sslRequireValidMMSServerCertificates: "false"

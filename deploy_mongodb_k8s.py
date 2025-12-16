@@ -32,7 +32,7 @@ from typing import Optional, List, Dict
 
 # Import shared modules
 from shared.validators import positive_int, non_negative_int, valid_port, valid_namespace, valid_timeout
-from shared.utils import run_command, convert_path_for_docker, check_docker, generate_secure_password
+from shared.utils import run_command, convert_path_for_docker, check_docker, find_openssl, run_openssl, generate_secure_password
 from shared.models import OpsManagerCredentials
 from shared.preflight import PreFlightChecker
 from shared.decorators import retry_with_backoff
@@ -41,6 +41,17 @@ from shared.kind_manager_base import BaseKindManager
 from shared.k8s_manager_base import BaseKubernetesManager
 from shared.operator_deployer_base import BaseOperatorDeployer
 from shared.ops_manager_cleanup import cleanup_ops_manager_project
+from shared.certificate_manager import CertificateManager, generate_single_cluster_sans
+from shared.x509_manager import X509CertificateManager
+from shared.health_check import MongoDBHealthChecker, format_health_check_result
+from shared.ui_utils import (
+    mask_password,
+    format_error_with_suggestion,
+    print_step,
+    CountdownTimer,
+)
+from shared import constants
+from shared.cleanup import cleanup_generated_files as _cleanup_generated_files
 
 # Configure logging
 logging.basicConfig(
@@ -53,47 +64,15 @@ logger = logging.getLogger(__name__)
 # Script directory for resolving relative paths
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
-
-def run_openssl(args: list, description: str) -> bool:
-    """Run an OpenSSL command with proper error logging.
-    
-    Args:
-        args: Command arguments (without 'openssl' prefix)
-        description: Human-readable description of the operation
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    cmd = ["openssl"] + args
-    try:
-        result = subprocess.run(
-            cmd, check=True, capture_output=True, text=True,
-            encoding='utf-8', errors='replace'
-        )
-        return True
-    except subprocess.CalledProcessError as e:
-        logger.error(f"OpenSSL {description} failed")
-        if e.stderr:
-            logger.error(f"OpenSSL stderr: {e.stderr.strip()}")
-        if e.stdout:
-            logger.debug(f"OpenSSL stdout: {e.stdout.strip()}")
-        return False
-    except FileNotFoundError:
-        logger.error("OpenSSL not found. Please install OpenSSL and ensure it's in your PATH.")
-        return False
-
-
-# Constants - Docker images for kind and kubectl
-KIND_NODE_IMAGE = "kindest/node:v1.28.0"
-KUBECTL_IMAGE = "bitnami/kubectl:1.28"
-OPERATOR_VERSION = "1.33.0"
-
-# Official MongoDB Enterprise Kubernetes Operator installation URLs
-OPERATOR_CRDS_URL = "https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/crds.yaml"
-OPERATOR_INSTALL_URL = "https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/mongodb-enterprise.yaml"
+# Constants - imported from shared.constants for single source of truth
+KIND_NODE_IMAGE = constants.KIND_NODE_IMAGE
+KUBECTL_IMAGE = constants.KUBECTL_DOCKER_IMAGE
+OPERATOR_VERSION = constants.DEFAULT_OPERATOR_VERSION
+OPERATOR_CRDS_URL = constants.OPERATOR_CRDS_URL
+OPERATOR_INSTALL_URL = constants.OPERATOR_INSTALL_URL
 
 # YAML template directory
-K8S_YAML_DIR = SCRIPT_DIR / "k8s"
+K8S_YAML_DIR = SCRIPT_DIR / constants.SINGLE_CLUSTER_TEMPLATES
 
 # Template file names
 KIND_CLUSTER_CONFIG_TEMPLATE = "kind-cluster-config.yaml"
@@ -104,6 +83,30 @@ KIND_CLUSTER_CONFIG_TEMPLATE = "kind-cluster-config.yaml"
 # =============================================================================
 
 # positive_int, non_negative_int, valid_port, valid_namespace are imported from shared.validators
+
+
+# =============================================================================
+# Cleanup Helpers
+# =============================================================================
+
+def cleanup_generated_files(kubeconfig_dir: str = "./.kube") -> None:
+    """Clean up generated files from K8s single-cluster deployment.
+
+    This is a wrapper around shared.cleanup.cleanup_generated_files for
+    backwards compatibility. Uses the consolidated cleanup module.
+
+    Cleans up:
+    - k8s/generated/ directory contents
+    - certs/mongodb/ directory contents (MongoDB TLS certs)
+    - .kube/ directory contents (kubeconfig files, kind configs)
+
+    Does NOT clean up:
+    - certs/ca.crt and certs/ca.key (managed by deploy_ops_manager.py)
+
+    Args:
+        kubeconfig_dir: Directory containing kubeconfig files (deprecated, ignored)
+    """
+    _cleanup_generated_files(SCRIPT_DIR, multi_cluster=False)
 
 
 # =============================================================================
@@ -128,26 +131,19 @@ class YAMLTemplateManager(BaseYAMLTemplateManager):
         """Render replica set namespace.yaml."""
         return self.render_namespace(namespace, "mongodb-rs-namespace.yaml", "mongodb-rs-namespace.yaml")
 
-    def render_replicaset(self, namespace: str, rs_name: str,
-                          tls_require_valid_certs: bool = True) -> Path:
-        """Render mongodb-replicaset.yaml with replica set configuration.
+    def render_replicaset(self, namespace: str) -> Path:
+        """Render mongodb-replicaset.yaml.
 
         Security features (TLS, SCRAM+X509 auth, external access via NodePort) are always enabled.
-        Static configuration values (members, version, resources, ports, auth modes, horizons)
+        Static configuration values (rs_name, members, version, resources, ports, auth modes, horizons)
         are defined in the template and extracted at runtime where needed.
 
         Args:
-            namespace: Kubernetes namespace for the deployment
-            rs_name: Name of the replica set
-            tls_require_valid_certs: Whether to require valid TLS certs for Ops Manager
+            namespace: Kubernetes namespace for the deployment (used for namespace: field replacement)
         """
         return self._render_with_namespace(
             "mongodb-replicaset.yaml",
-            {
-                "REPLICA_SET_NAME": rs_name,
-                "TLS_REQUIRE_VALID_CERTS": "true" if tls_require_valid_certs else "false",
-                "SSL_REQUIRE_VALID_MMS_CERTS": "true" if tls_require_valid_certs else "false",
-            },
+            {},  # REPLICA_SET_NAME, TLS_REQUIRE_VALID_CERTS, SSL_REQUIRE_VALID_MMS_CERTS hardcoded in template
             namespace=namespace
         )
 
@@ -204,20 +200,6 @@ class YAMLTemplateManager(BaseYAMLTemplateManager):
 
         return [int(port) for port in matches] if matches else [27017]
 
-    def render_x509_user(self, namespace: str, x509_username: str, rs_name: str) -> Path:
-        """Render mongodb-x509-user.yaml with X509 user configuration.
-
-        Args:
-            namespace: Kubernetes namespace
-            x509_username: The certificate subject DN in RFC2253 format
-            rs_name: MongoDB replica set name
-        """
-        return self._render_with_namespace(
-            "mongodb-x509-user.yaml",
-            {"X509_USERNAME": x509_username, "REPLICA_SET_NAME": rs_name},
-            namespace=namespace
-        )
-
 
 # =============================================================================
 # Utility Functions (imported from shared modules)
@@ -230,10 +212,17 @@ class YAMLTemplateManager(BaseYAMLTemplateManager):
 
 @dataclass
 class ClusterConfig:
-    """Configuration for the Kubernetes cluster."""
+    """Configuration for the Kubernetes cluster.
+
+    Namespace values are hardcoded to match the YAML templates:
+    - operator_namespace: 'mongodb' (k8s/namespace.yaml)
+    - rs_namespace: 'mongodb-rs' (k8s/mongodb-rs-namespace.yaml)
+    """
     name: str = "mongodb-k8s"
-    operator_namespace: str = "mongodb"      # Namespace for the operator
-    rs_namespace: str = "mongodb-rs"         # Namespace for replica sets
+    # Hardcoded values matching templates - do not change without updating templates
+    operator_namespace: str = "mongodb"      # Matches k8s/namespace.yaml
+    rs_namespace: str = "mongodb-rs"         # Matches k8s/mongodb-rs-namespace.yaml
+    # User-configurable values
     worker_nodes: int = 1
     ops_manager_url: str = "https://host.docker.internal:8443"
     kubeconfig_dir: str = "./.kube"
@@ -253,11 +242,13 @@ class ReplicaSetConfig:
     """Configuration for the MongoDB replica set.
 
     Security features (TLS, SCRAM+X509 auth, external access via NodePort) are always enabled.
-    Static configuration values (members, version, resources, ports) are defined in the
-    YAML template at k8s/mongodb-replicaset.yaml and extracted at runtime.
+    Static configuration values (name, username, members, version, resources, ports) are
+    hardcoded in the YAML template at k8s/mongodb-replicaset.yaml for consistency.
     """
-    name: str = "mongodb-rs"
-    mongodb_username: str = "admin"
+    # Hardcoded values matching templates - do not change without updating templates
+    name: str = "mongodb-rs"  # Matches k8s/mongodb-replicaset.yaml
+    mongodb_username: str = "admin"  # Matches k8s/mongodb-user.yaml
+    # User-configurable values
     mongodb_password: Optional[str] = None
     x509_subject_dn: Optional[str] = None  # Set after X509 user creation
 
@@ -525,12 +516,21 @@ class MongoDBOperatorDeployer:
         rs_namespace = self.cluster_config.rs_namespace
         logger.info(f"Creating/updating Ops Manager ConfigMap in {rs_namespace}...")
 
+        # Validate project_id is set - prevents operator from creating duplicate projects
+        if not self.credentials.project_id:
+            logger.error("Project ID is not set. Cannot create ConfigMap without valid project ID.")
+            return False
+
+        logger.info(f"Using project: {self.credentials.project_name} (ID: {self.credentials.project_id})")
+
         # Generate YAML from template - use rs_namespace for MongoDB pods
+        # Use both projectName and projectId to ensure correct project
         yaml_path = self.yaml_manager.render_configmap(
             namespace=rs_namespace,
             base_url=self.cluster_config.ops_manager_url,
-            project_name=self.credentials.project_name,
+            project_id=self.credentials.project_id,
             org_id=self.credentials.org_id,
+            project_name=self.credentials.project_name,
             ssl_require_valid_certs=not self.cluster_config.ssl_skip_verify
         )
 
@@ -615,10 +615,7 @@ class MongoDBOperatorDeployer:
         logger.info(f"Creating RBAC for operator in {rs_namespace} namespace...")
 
         # Generate YAML from template
-        yaml_path = self.yaml_manager.render_operator_rbac(
-            rs_namespace=rs_namespace,
-            operator_namespace=operator_namespace
-        )
+        yaml_path = self.yaml_manager.render_operator_rbac()
 
         logger.info(f"Generated operator RBAC YAML: {yaml_path}")
         yaml_content = yaml_path.read_text(encoding='utf-8')
@@ -633,7 +630,7 @@ class MongoDBOperatorDeployer:
         logger.info(f"Deploying MongoDB database roles in {rs_namespace}...")
 
         # Generate YAML from template
-        yaml_path = self.yaml_manager.render_database_roles(rs_namespace=rs_namespace)
+        yaml_path = self.yaml_manager.render_database_roles()
 
         logger.info(f"Generated database roles YAML: {yaml_path}")
         yaml_content = yaml_path.read_text(encoding='utf-8')
@@ -708,87 +705,27 @@ class MongoDBReplicaSetDeployer:
         rs_namespace = self.cluster_config.rs_namespace
         rs_name = self.rs_config.name
         certs_dir = SCRIPT_DIR / "certs/mongodb"
-        certs_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"Generating MongoDB TLS certificates for {rs_name}...")
 
-        # Use existing CA from ./certs/
-        ca_cert = SCRIPT_DIR / "certs/ca.crt"
-        ca_key = SCRIPT_DIR / "certs/ca.key"
+        # Use shared certificate manager
+        cert_manager = CertificateManager(SCRIPT_DIR / "certs")
 
-        if not ca_cert.exists() or not ca_key.exists():
-            logger.error("CA certificate not found. Run deploy_ops_manager.py first.")
-            return False
-
-        # Generate SANs for all MongoDB pods (internal Kubernetes hostnames)
+        # Generate SANs using shared helper
         members = self.yaml_manager.get_members_count()
-        dns_sans = [f"DNS:{rs_name}-{i}.{rs_name}-svc.{rs_namespace}.svc.cluster.local" for i in range(members)]
-        dns_sans.append(f"DNS:{rs_name}-svc.{rs_namespace}.svc.cluster.local")
-        dns_sans.append(f"DNS:*.{rs_name}-svc.{rs_namespace}.svc.cluster.local")
-        dns_sans.append("DNS:localhost")
+        dns_sans, ip_sans = generate_single_cluster_sans(
+            rs_name=rs_name,
+            rs_namespace=rs_namespace,
+            members_count=members,
+            include_localhost=True
+        )
 
-        # Add IP SANs for external access (always enabled with localhost)
-        dns_sans.append("IP:127.0.0.1")
-        dns_sans.append("IP:::1")
-
-        san_list = ",".join(dns_sans)
-
-        # Create extension config file
-        ext_file = certs_dir / "mongodb-ext.cnf"
-        ext_content = f"""[req]
-distinguished_name = req_distinguished_name
-req_extensions = v3_req
-prompt = no
-
-[req_distinguished_name]
-CN = {rs_name}
-
-[v3_req]
-basicConstraints = CA:FALSE
-keyUsage = critical, digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth, clientAuth
-subjectAltName = {san_list}
-"""
-        ext_file.write_text(ext_content)
-
-        mongodb_key = certs_dir / "mongodb.key"
-        mongodb_csr = certs_dir / "mongodb.csr"
-        mongodb_cert = certs_dir / "mongodb.crt"
-
-        # Generate private key
-        if not run_openssl(
-            ["genrsa", "-out", str(mongodb_key), "2048"],
-            "private key generation"
-        ):
-            return False
-
-        # Generate CSR
-        if not run_openssl(
-            ["req", "-new", "-key", str(mongodb_key),
-             "-out", str(mongodb_csr), "-config", str(ext_file)],
-            "CSR generation"
-        ):
-            return False
-
-        # Sign certificate with CA
-        if not run_openssl(
-            ["x509", "-req", "-in", str(mongodb_csr),
-             "-CA", str(ca_cert), "-CAkey", str(ca_key),
-             "-CAcreateserial", "-out", str(mongodb_cert),
-             "-days", "365", "-extensions", "v3_req",
-             "-extfile", str(ext_file)],
-            "certificate signing"
-        ):
-            return False
-
-        logger.info(f"Generated MongoDB certificate: {mongodb_cert}")
-
-        # Clean up temporary files (CSR and extension config)
-        for temp_file in [mongodb_csr, ext_file]:
-            if temp_file.exists():
-                temp_file.unlink()
-
-        return True
+        return cert_manager.generate_mongodb_certificate(
+            output_dir=certs_dir,
+            cn=rs_name,
+            dns_sans=dns_sans,
+            ip_sans=ip_sans
+        )
 
     def create_mongodb_tls_secrets(self) -> bool:
         """Create TLS certificate secrets for MongoDB.
@@ -824,7 +761,6 @@ subjectAltName = {san_list}
 
         # Create CA ConfigMap using template (mongodb-ca with key 'ca-pem')
         yaml_path = self.yaml_manager.render_mongodb_ca_configmap(
-            rs_namespace=rs_namespace,
             ca_cert_path=ca_cert
         )
         logger.info(f"Generated mongodb-ca ConfigMap YAML: {yaml_path}")
@@ -876,100 +812,21 @@ subjectAltName = {san_list}
     def generate_client_certificate(self, cn: str = "x509-client") -> Optional[str]:
         """Generate a client certificate for X509 authentication.
 
+        Uses the shared X509CertificateManager to generate client certificates.
+
         Args:
             cn: Common Name for the client certificate
 
         Returns:
-            The certificate subject DN in RFC2253 format (e.g., O=MongoDB,OU=clients,CN=x509-client),
+            The certificate subject DN in RFC2253 format (e.g., CN=x509-client,OU=clients,O=MongoDB),
             or None if generation failed.
         """
-        certs_dir = SCRIPT_DIR / "certs/mongodb"
-        certs_dir.mkdir(parents=True, exist_ok=True)
-
-        logger.info(f"Generating X509 client certificate for '{cn}'...")
-
-        # Use existing CA from ./certs/
-        ca_cert = SCRIPT_DIR / "certs/ca.crt"
-        ca_key = SCRIPT_DIR / "certs/ca.key"
-
-        if not ca_cert.exists() or not ca_key.exists():
-            logger.error("CA certificate not found. Run deploy_ops_manager.py first.")
-            return None
-
-        # Define certificate subject components
-        org = "MongoDB"
-        ou = "clients"
-
-        # MongoDB extracts the DN from the certificate in reverse order (most specific first)
-        # OpenSSL shows: subject=O=MongoDB, OU=clients, CN=x509-client
-        # But MongoDB sees: CN=x509-client,OU=clients,O=MongoDB
-        x509_subject_dn = f"CN={cn},OU={ou},O={org}"
-
-        # Create extension config file for client certificate
-        ext_file = certs_dir / "client-ext.cnf"
-        ext_content = f"""[req]
-distinguished_name = req_distinguished_name
-req_extensions = v3_req
-prompt = no
-
-[req_distinguished_name]
-O = {org}
-OU = {ou}
-CN = {cn}
-
-[v3_req]
-basicConstraints = CA:FALSE
-keyUsage = critical, digitalSignature, keyEncipherment
-extendedKeyUsage = clientAuth
-"""
-        ext_file.write_text(ext_content)
-
-        client_key = certs_dir / "client.key"
-        client_csr = certs_dir / "client.csr"
-        client_cert = certs_dir / "client.crt"
-        client_pem = certs_dir / "client.pem"  # Combined cert+key for mongosh
-
-        # Generate private key
-        if not run_openssl(
-            ["genrsa", "-out", str(client_key), "2048"],
-            "client private key generation"
-        ):
-            return None
-
-        # Generate CSR with the specified subject
-        if not run_openssl(
-            ["req", "-new", "-key", str(client_key),
-             "-out", str(client_csr), "-config", str(ext_file)],
-            "client CSR generation"
-        ):
-            return None
-
-        # Sign certificate with CA
-        if not run_openssl(
-            ["x509", "-req", "-in", str(client_csr),
-             "-CA", str(ca_cert), "-CAkey", str(ca_key),
-             "-CAcreateserial", "-out", str(client_cert),
-             "-days", "365", "-extensions", "v3_req",
-             "-extfile", str(ext_file)],
-            "client certificate signing"
-        ):
-            return None
-
-        # Create combined PEM file for mongosh (cert + key)
-        cert_content = client_cert.read_text()
-        key_content = client_key.read_text()
-        client_pem.write_text(cert_content + key_content)
-
-        logger.info(f"Generated X509 client certificate: {client_cert}")
-        logger.info(f"Generated combined PEM file: {client_pem}")
-        logger.info(f"Certificate subject DN (RFC2253): {x509_subject_dn}")
-
-        # Clean up temporary files (CSR and extension config)
-        for temp_file in [client_csr, ext_file]:
-            if temp_file.exists():
-                temp_file.unlink()
-
-        return x509_subject_dn
+        x509_manager = X509CertificateManager(
+            ca_cert_path=SCRIPT_DIR / "certs/ca.crt",
+            ca_key_path=SCRIPT_DIR / "certs/ca.key",
+            output_dir=SCRIPT_DIR / "certs/mongodb"
+        )
+        return x509_manager.generate_client_certificate(cn=cn)
 
     def create_x509_user(self, x509_subject_dn: str) -> bool:
         """Create MongoDB X509 user via the operator.
@@ -1018,7 +875,7 @@ extendedKeyUsage = clientAuth
         logger.info("Created mongodb-admin-password Secret")
 
         # Create MongoDBUser resource
-        yaml_path = self.yaml_manager.render_user(rs_namespace, username, rs_name)
+        yaml_path = self.yaml_manager.render_user(rs_namespace)
         yaml_content = yaml_path.read_text(encoding='utf-8')
         if not self.k8s.apply_yaml(yaml_content):
             logger.error("Failed to create MongoDBUser resource")
@@ -1045,9 +902,7 @@ extendedKeyUsage = clientAuth
 
         # Generate YAML from template - use rs_namespace for MongoDB pods
         yaml_path = self.yaml_manager.render_replicaset(
-            namespace=rs_namespace,
-            rs_name=self.rs_config.name,
-            tls_require_valid_certs=not self.cluster_config.ssl_skip_verify
+            namespace=rs_namespace
         )
 
         logger.info(f"Generated replica set YAML: {yaml_path}")
@@ -1075,41 +930,61 @@ extendedKeyUsage = clientAuth
 
         return True
 
-    def patch_nodeport_services(self) -> bool:
-        """Patch NodePort services to use specific ports matching the split-horizon DNS config.
+    def precreate_nodeport_services(self) -> bool:
+        """Pre-create NodePort services with fixed ports before MongoDB deployment.
 
-        The MongoDB operator creates external services with random NodePorts, but we need
-        them to match our kind port mappings for external connectivity.
+        The MongoDB operator reuses existing services if they match the expected naming
+        convention. By pre-creating services with fixed NodePorts, the operator preserves
+        the port assignments instead of assigning random ports.
 
         Port numbers are extracted from the replicaset template's connectivity.replicaSetHorizons.
-        External access via NodePort is always enabled.
         """
         rs_namespace = self.cluster_config.rs_namespace
         rs_name = self.rs_config.name
 
         # Extract ports from template
         external_ports = self.yaml_manager.get_external_ports()
-        logger.info(f"Patching NodePort services to use ports {external_ports}...")
+        logger.info(f"Pre-creating NodePort services with ports {external_ports}...")
 
         for i, target_port in enumerate(external_ports):
             svc_name = f"{rs_name}-{i}-svc-external"
+            pod_name = f"{rs_name}-{i}"
 
-            # Patch the service to use specific nodePort
-            patch_cmd = [
+            # Generate service YAML
+            svc_yaml = f"""apiVersion: v1
+kind: Service
+metadata:
+  name: {svc_name}
+  namespace: {rs_namespace}
+  labels:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: {pod_name}
+spec:
+  type: NodePort
+  ports:
+  - name: mongodb
+    port: 27017
+    targetPort: 27017
+    nodePort: {target_port}
+  selector:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: {pod_name}
+"""
+
+            # Apply the service
+            apply_cmd = [
                 "kubectl", "--kubeconfig", str(self.k8s.kubeconfig_file),
-                "patch", "svc", svc_name, "-n", rs_namespace,
-                "--type=json",
-                f'-p=[{{"op": "replace", "path": "/spec/ports/0/nodePort", "value": {target_port}}}]'
+                "apply", "-f", "-"
             ]
 
             try:
-                result = run_command(patch_cmd, check=False, timeout=30)
+                result = run_command(apply_cmd, input_data=svc_yaml, check=False, timeout=30)
                 if result.returncode != 0:
-                    logger.warning(f"Failed to patch service {svc_name}: {result.stderr}")
+                    logger.warning(f"Failed to create service {svc_name}: {result.stderr}")
                     continue
-                logger.info(f"Patched {svc_name} to use nodePort {target_port}")
+                logger.info(f"Created {svc_name} with nodePort {target_port}")
             except Exception as e:
-                logger.warning(f"Error patching service {svc_name}: {e}")
+                logger.warning(f"Error creating service {svc_name}: {e}")
                 continue
 
         return True
@@ -1212,12 +1087,10 @@ All tools (kind, kubectl) run via Docker - no local installation required!
     )
 
     # Cluster options
+    # Note: operator-namespace and rs-namespace are hardcoded in templates
+    # (mongodb and mongodb-rs respectively) for consistency
     cluster_group = parser.add_argument_group("Cluster Options")
     cluster_group.add_argument("--cluster-name", default="mongodb-k8s", help="Kind cluster name")
-    cluster_group.add_argument("--operator-namespace", type=valid_namespace, default="mongodb",
-                               help="Namespace for MongoDB operator (default: mongodb)")
-    cluster_group.add_argument("--rs-namespace", type=valid_namespace, default="mongodb-rs",
-                               help="Namespace for MongoDB replica set (default: mongodb-rs)")
     cluster_group.add_argument("--worker-nodes", type=non_negative_int, default=1,
                                help="Number of worker nodes (default: 1)")
     cluster_group.add_argument("--kubeconfig-dir", default="./.kube", help="Directory for kubeconfig")
@@ -1231,14 +1104,10 @@ All tools (kind, kubectl) run via Docker - no local installation required!
     om_group.add_argument("--ssl-skip-verify", action="store_true",
                           help="Skip TLS certificate validation for Ops Manager (INSECURE - testing only)")
 
-    # Replica set options
-    rs_group = parser.add_argument_group("Replica Set Options")
-    rs_group.add_argument("--replica-set-name", default="mongodb-rs", help="Replica set name")
-
     # Authentication options
+    # Note: replica-set-name and mongodb-username are now hardcoded in templates
+    # (mongodb-rs and admin respectively) for consistency
     auth_group = parser.add_argument_group("Authentication Options")
-    auth_group.add_argument("--mongodb-username", default="admin",
-                            help="MongoDB admin username (default: admin)")
     auth_group.add_argument("--mongodb-password", default=None,
                             help="MongoDB admin password (auto-generated if not provided)")
 
@@ -1250,12 +1119,16 @@ All tools (kind, kubectl) run via Docker - no local installation required!
     mode_group.add_argument("--instructions-only", action="store_true", help="Only print kubectl instructions")
     mode_group.add_argument("--cluster-only", action="store_true", help="Only create the kind cluster")
     mode_group.add_argument("--skip-preflight", action="store_true", help="Skip pre-flight validation checks")
-    mode_group.add_argument("--wait", action="store_true",
-                            help="Wait for MongoDB to reach Running state")
+    mode_group.add_argument("--no-wait", action="store_true",
+                            help="Don't wait for MongoDB to reach Running state (default: wait)")
     mode_group.add_argument("--wait-timeout", type=valid_timeout(60, 1800), default=600,
-                            help="Timeout for --wait in seconds (default: 600, min: 60, max: 1800)")
+                            help="Timeout for waiting in seconds (default: 600, min: 60, max: 1800)")
+    mode_group.add_argument("--skip-health-check", action="store_true",
+                            help="Skip MongoDB connectivity health check after deployment")
     mode_group.add_argument("--dry-run", action="store_true",
                             help="Show what would be done without making changes")
+    mode_group.add_argument("--show-password", action="store_true",
+                            help="Show passwords in plain text (default: masked)")
 
     # Logging
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
@@ -1266,10 +1139,10 @@ All tools (kind, kubectl) run via Docker - no local installation required!
         logging.getLogger().setLevel(logging.DEBUG)
 
     # Build configuration
+    # Note: operator_namespace and rs_namespace use hardcoded defaults
+    # matching the YAML templates (mongodb and mongodb-rs)
     cluster_config = ClusterConfig(
         name=args.cluster_name,
-        operator_namespace=args.operator_namespace,
-        rs_namespace=args.rs_namespace,
         worker_nodes=args.worker_nodes,
         ops_manager_url=args.ops_manager_url,
         kubeconfig_dir=args.kubeconfig_dir,
@@ -1285,10 +1158,8 @@ All tools (kind, kubectl) run via Docker - no local installation required!
         logger.warning("=" * 60)
 
     # Security features (TLS, SCRAM+X509 auth, external access via NodePort) are always enabled
-    # Static values (members, version, ports, resources) are defined in YAML templates
+    # Static values (name, username, members, version, ports, resources) are defined in YAML templates
     rs_config = ReplicaSetConfig(
-        name=args.replica_set_name,
-        mongodb_username=args.mongodb_username,
         mongodb_password=args.mongodb_password
     )
 
@@ -1337,16 +1208,57 @@ All tools (kind, kubectl) run via Docker - no local installation required!
     kind_manager = KindManager(cluster_config)
     k8s_manager = KubernetesManager(cluster_config)
 
-    # Handle cleanup
+    # Handle cleanup - correct order is:
+    # 1. Delete MongoDB CRD resource (MongoDB)
+    # 2. Wait for operator to deregister from Ops Manager
+    # 3. Delete Ops Manager project
+    # 4. Delete Kubernetes cluster
     if args.cleanup:
-        # Clean up Ops Manager project first (removes stale automation config)
-        logger.info("Cleaning up Ops Manager project...")
-        cleanup_ops_manager_project(
+        from shared.cleanup import delete_mongodb_crd
+
+        # Step 1: Delete MongoDB CRD resource BEFORE deleting the cluster
+        # This allows the operator to properly deregister from Ops Manager
+        kubeconfig_path = Path(cluster_config.kubeconfig_dir) / "config"
+        if kubeconfig_path.exists():
+            logger.info("Step 1/4: Deleting MongoDB CRD resource...")
+            delete_mongodb_crd(
+                kubeconfig=kubeconfig_path,
+                crd_name=rs_config.name,
+                namespace=cluster_config.rs_namespace,
+                crd_type="mongodb",
+                timeout=180  # 3 minutes to wait for operator cleanup
+            )
+        else:
+            logger.info("Kubeconfig not found, skipping MongoDB CRD deletion")
+
+        # Step 2: Wait additional time for Ops Manager to recognize deregistration
+        # The operator needs time to report back to Ops Manager
+        import time
+        from shared.constants import AGENT_DEREGISTRATION_WAIT
+        logger.info(f"Step 2/4: Waiting for Ops Manager to register agent removal ({AGENT_DEREGISTRATION_WAIT}s)...")
+        time.sleep(AGENT_DEREGISTRATION_WAIT)
+
+        # Step 3: Clean up Ops Manager project (reset automation config and delete project)
+        logger.info("Step 3/4: Cleaning up Ops Manager project...")
+        ca_cert_path = str(SCRIPT_DIR / "certs/ca.crt") if not cluster_config.ssl_skip_verify else None
+        if not cleanup_ops_manager_project(
             api_key_file=args.api_key_file,
             project_type="singleCluster",
-            verify_ssl=not cluster_config.ssl_skip_verify
-        )
+            verify_ssl=not cluster_config.ssl_skip_verify,
+            delete_project=True,
+            ca_cert_path=ca_cert_path
+        ):
+            logger.warning("Ops Manager project cleanup failed. "
+                          "You may need to delete the project manually from Ops Manager UI "
+                          "before redeploying to avoid stale certificate errors.")
+
+        # Step 4: Delete kind cluster (now safe because operator has cleaned up)
+        logger.info("Step 4/4: Deleting Kubernetes cluster...")
         kind_manager.delete_cluster()
+
+        # Clean up generated files (YAML files, MongoDB TLS certs, kubeconfig files)
+        cleanup_generated_files(kubeconfig_dir=cluster_config.kubeconfig_dir)
+
         return
 
     # Create cluster
@@ -1364,15 +1276,44 @@ All tools (kind, kubectl) run via Docker - no local installation required!
         credentials = OpsManagerCredentials.from_file(args.api_key_file, project_type="singleCluster")
         logger.info(f"Loaded Ops Manager credentials from: {args.api_key_file}")
     except FileNotFoundError:
-        logger.error(f"API key file not found: {args.api_key_file}")
-        logger.error("Run deploy_ops_manager.py first to generate credentials")
+        print(format_error_with_suggestion(
+            f"API key file not found: {args.api_key_file}",
+            "Run 'python deploy_ops_manager.py' first to set up Ops Manager and generate API credentials",
+            "The deployment scripts require Ops Manager to be running and configured"
+        ))
         sys.exit(1)
-    except (json.JSONDecodeError, KeyError, ValueError) as e:
-        logger.error(f"Failed to parse credentials file: {e}")
+    except json.JSONDecodeError as e:
+        print(format_error_with_suggestion(
+            f"Invalid JSON in credentials file: {args.api_key_file}",
+            "Check that the file contains valid JSON. You may need to regenerate it.",
+            str(e)
+        ))
         sys.exit(1)
-    except Exception as e:
-        logger.error(f"Unexpected error loading credentials: {e}")
+    except KeyError as e:
+        print(format_error_with_suggestion(
+            f"Missing required field in credentials file: {e}",
+            "Ensure the credentials file has all required fields (publicKey, privateKey, baseUrl, orgId)",
+            "File may be corrupted or from an older version"
+        ))
         sys.exit(1)
+
+    # Verify project exists in Ops Manager, create if needed
+    ssl_verify = not cluster_config.ssl_skip_verify
+    ca_cert_path = str(SCRIPT_DIR / "certs/ca.crt") if ssl_verify else None
+    project_id = credentials.create_project_if_not_exists(
+        ssl_verify=ssl_verify,
+        credentials_file=args.api_key_file,
+        project_type="singleCluster",
+        ca_cert_path=ca_cert_path
+    )
+    if not project_id:
+        print(format_error_with_suggestion(
+            "Failed to verify or create Ops Manager project",
+            "Check that Ops Manager is running and accessible at: " + credentials.base_url,
+            "Verify API credentials are correct and have project creation permissions"
+        ))
+        sys.exit(1)
+    logger.info(f"Using Ops Manager project: {credentials.project_name} (ID: {project_id})")
 
     # Initialize YAML template manager
     yaml_manager = YAMLTemplateManager()
@@ -1390,31 +1331,56 @@ All tools (kind, kubectl) run via Docker - no local installation required!
     # Deploy replica set
     if not args.skip_replica_set:
         rs_deployer = MongoDBReplicaSetDeployer(k8s_manager, credentials, cluster_config, rs_config, yaml_manager)
+
+        # Pre-create NodePort services with fixed ports BEFORE MongoDB deployment
+        # The operator will reuse these services instead of creating new ones with random ports
+        logger.info("Pre-creating NodePort services with fixed ports...")
+        rs_deployer.precreate_nodeport_services()
+
         if not rs_deployer.deploy_replica_set():
             logger.error("Failed to deploy replica set")
             sys.exit(1)
 
         logger.info("Replica set deployment initiated")
 
-        # Wait for MongoDB to be Running if requested
-        if args.wait:
+        # Wait for MongoDB to be Running (default behavior, unless --no-wait)
+        if not args.no_wait:
             monitor = MongoDBStatusMonitor(k8s_manager, cluster_config.rs_namespace, rs_config.name)
             if not monitor.wait_for_running(timeout=args.wait_timeout):
                 logger.error("MongoDB did not reach Running state within timeout")
                 sys.exit(1)
 
-            # Patch NodePort services after deployment is ready
-            rs_deployer.patch_nodeport_services()
+            # Run health check to verify MongoDB is accessible
+            if not args.skip_health_check:
+                external_hosts = yaml_manager.get_external_hosts()
+                hosts = [h.strip() for h in external_hosts.split(',')]
+                ca_cert = SCRIPT_DIR / "certs/ca.crt"
+
+                logger.info("Running MongoDB connectivity health check...")
+                health_checker = MongoDBHealthChecker(
+                    hosts=hosts,
+                    tls_enabled=True,
+                    ca_cert_path=ca_cert
+                )
+                result = health_checker.wait_for_healthy(timeout=60)
+                print(format_health_check_result(result))
+
+                if not result.success:
+                    logger.warning("MongoDB connectivity check failed - deployment may not be fully accessible")
         else:
             logger.info("Note: It may take several minutes for all pods to be ready")
-            logger.info("Use --wait to wait for MongoDB to reach Running state")
+            logger.info("Use default behavior (no --no-wait) to wait for MongoDB to reach Running state")
 
     # Print summary and instructions (security features are always enabled)
+    # Mask password unless --show-password is specified
+    display_password = rs_config.mongodb_password if args.show_password else mask_password(rs_config.mongodb_password)
     auth_info = f"""
 Authentication: ENABLED (SCRAM + X509)
 SCRAM User: {rs_config.mongodb_username}
-SCRAM Password: {rs_config.mongodb_password}
+SCRAM Password: {display_password}
 """
+    if not args.show_password:
+        auth_info += "(use --show-password to reveal)\n"
     if rs_config.x509_subject_dn:
         auth_info += f"X509 User DN: {rs_config.x509_subject_dn}\n"
         auth_info += f"X509 Client Cert: ./certs/mongodb/client.pem\n"
@@ -1444,7 +1410,7 @@ Generated YAML: {yaml_manager.generated_dir.resolve()}
 """)
 
     # Print connection instructions (security features are always enabled)
-    certs_path = SCRIPT_DIR / "certs".resolve()
+    certs_path = (SCRIPT_DIR / "certs").resolve()
     # Extract external hosts from template
     external_hosts = yaml_manager.get_external_hosts()
     print(f"""

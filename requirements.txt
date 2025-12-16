@@ -1,0 +1,11 @@
+# MongoDB Enterprise Kubernetes Operator Deployment Scripts
+# =========================================================
+# Required dependencies for running the deployment scripts
+
+# YAML parsing for Kubernetes manifests
+PyYAML>=6.0
+
+# =============================================================================
+# Development Dependencies (optional - only needed for running tests)
+# =============================================================================
+# Install with: pip install -r requirements.txt -r requirements-dev.txt

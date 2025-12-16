@@ -1,204 +1,89 @@
 # MongoDB Enterprise Kubernetes Operator - Multi-Cluster Manual Deployment Guide
 
-This guide provides step-by-step instructions for manually deploying MongoDB across multiple Kubernetes clusters using the MongoDB Enterprise Kubernetes Operator.
-
-## Architecture Overview
-
-```
-┌───────────────────────────────────────────┐     ┌───────────────────────────────────────┐
-│           CENTRAL CLUSTER                 │     │           MEMBER CLUSTER              │
-│           (mongodb-central)               │     │           (mongodb-member-1)          │
-│                                           │     │                                       │
-│  ┌─────────────────────────────────┐      │     │                                       │
-│  │  mongodb namespace              │      │     │                                       │
-│  │  ┌─────────────────────────┐    │      │     │                                       │
-│  │  │ MongoDB Operator        │────┼──────┼─────┼────────────────────────────┐          │
-│  │  │ (watches both clusters) │    │      │     │                            │          │
-│  │  └─────────────────────────┘    │      │     │                            │          │
-│  └─────────────────────────────────┘      │     │                            │          │
-│                                           │     │                            │          │
-│  ┌─────────────────────────────────┐      │     │  ┌─────────────────────────▼──────┐   │
-│  │  mongodb-rs namespace           │      │     │  │  mongodb-rs namespace          │   │
-│  │  ┌─────────┐┌─────────┐┌───────┐│      │     │  │  ┌─────────┐ ┌─────────┐       │   │
-│  │  │MongoDB-0││MongoDB-1││Mongo-2││      │     │  │  │MongoDB-3│ │MongoDB-4│       │   │
-│  │  │(Primary)││(Second.)││(Sec.) ││      │     │  │  │(Second.)│ │(Second.)│       │   │
-│  │  └────┬────┘└────┬────┘└───┬───┘│      │     │  │  └────┬────┘ └────┬────┘       │   │
-│  └───────┼──────────┼─────────┼────┘      │     │  └───────┼──────────┼─────────────┘   │
-│          │          │         │           │     │          │          │                 │
-│       :30100     :30101    :30102         │     │       :30200     :30201               │
-└──────────┴──────────┴─────────┴───────────┘     └──────────┴──────────┴─────────────────┘
-           │          │         │                            │          │
-           └──────────┴─────────┴────────────────────────────┴──────────┘
-                          Cross-cluster replication (5-node replica set)
-                          via external domains
-```
+This guide provides step-by-step instructions for manually deploying MongoDB across multiple Kubernetes clusters using the MongoDB Enterprise Kubernetes Operator. These steps replicate what the `deploy_mongodb_k8s_multi.py` script does automatically.
 
 ## Prerequisites
 
 1. **Docker** running on your machine
-2. **Ops Manager** deployed and accessible (see `deploy_ops_manager.py`)
+2. **Ops Manager** deployed and accessible (use `deploy_ops_manager.py` or see separate guide)
 3. **API credentials** from Ops Manager (`ops-manager-api-key.json`)
-4. **CA certificate** for TLS (`./certs/ca.crt`)
-5. **kind** (Kubernetes IN Docker) - downloaded automatically or install manually
-6. **kubectl** - downloaded automatically via Docker or install locally
+4. **CA certificate** for TLS (`./certs/ca.crt` and `./certs/ca.key`)
+5. **kind** binary (download from https://kind.sigs.k8s.io/)
+6. **kubectl** installed
 
-### Verify Prerequisites
+### Resource Requirements
 
-Run these commands to verify your environment is ready:
-
-```bash
-# Check Docker is running
-docker version
-
-# Check kubectl (optional - can use Docker-based kubectl)
-kubectl version --client
-
-# Check OpenSSL
-openssl version
-
-# Verify Ops Manager is accessible
-curl -k https://localhost:8443/user/login
-
-# Verify API credentials file exists
-cat ops-manager-api-key.json
-
-# Verify CA certificate exists
-ls -la ./certs/ca.crt
-```
-
-Expected output shows version numbers for each tool and confirms credential files exist.
-
-## Quick Start (Automated)
-
-Use the automated script for the fastest deployment:
-
-```bash
-# Full deployment with wait
-python deploy_mongodb_k8s_multi.py --wait
-
-# Custom cluster names
-python deploy_mongodb_k8s_multi.py --central-cluster-name my-central --member-cluster-name my-member
-
-# With SSL verification disabled (testing only)
-python deploy_mongodb_k8s_multi.py --ssl-skip-verify --wait
-
-# Cleanup all clusters
-python deploy_mongodb_k8s_multi.py --cleanup
-```
-
-## Cross-Cluster DNS with CoreDNS
-
-A critical challenge in multi-cluster MongoDB deployments is DNS resolution. Each MongoDB pod needs to resolve hostnames for pods in both local and remote clusters for replica set communication.
-
-### The DNS Problem
-
-MongoDB replica set members communicate using hostnames defined in `replicaSetHorizons`. In a multi-cluster setup:
-- Pods in the **central cluster** need to resolve hostnames for pods in the **member cluster**
-- Pods in the **member cluster** need to resolve hostnames for pods in the **central cluster**
-- Standard Kubernetes DNS only resolves local cluster services
-
-### The Solution: CoreDNS Rewrite Rules + Static Hosts
-
-The deployment script configures CoreDNS in each cluster with two strategies:
-
-#### 1. Local Pods: DNS Rewrite Rules
-
-For pods in the **same cluster**, use CoreDNS `rewrite` rules to redirect external domain queries to internal Kubernetes DNS:
-
-```
-# In central cluster CoreDNS:
-rewrite name mongodb-multi-rs-0-0.central.mongodb.local mongodb-multi-rs-0-0.mongodb-multi-rs-svc.mongodb-rs.svc.cluster.local
-rewrite name mongodb-multi-rs-0-1.central.mongodb.local mongodb-multi-rs-0-1.mongodb-multi-rs-svc.mongodb-rs.svc.cluster.local
-```
-
-This ensures that when pods restart and get new IPs, DNS automatically resolves to the correct address.
-
-#### 2. Remote Pods: Static Hosts + NodePort Routing
-
-For pods in **remote clusters**, use static `hosts` entries pointing to virtual IPs that are routed via iptables to NodePort services:
-
-```
-# In central cluster CoreDNS (for member cluster pods):
-hosts {
-    172.19.0.100 mongodb-multi-rs-1-0.member1.mongodb.local
-    172.19.0.101 mongodb-multi-rs-1-1.member1.mongodb.local
-    fallthrough
-}
-```
-
-The virtual IPs (172.19.0.x) are routed through iptables DNAT rules to the member cluster's NodePort:
-
-```bash
-# On central cluster node:
-iptables -t nat -A OUTPUT -d 172.19.0.100 -p tcp --dport 27017 -j DNAT --to-destination <member-node-ip>:30200
-```
-
-### DNS Architecture Diagram
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           CENTRAL CLUSTER                                    │
-│                                                                              │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                         CoreDNS                                      │    │
-│  │  ┌─────────────────────────────────────────────────────────────┐    │    │
-│  │  │ REWRITE (local pods):                                        │    │    │
-│  │  │   *.central.mongodb.local → *.mongodb-rs.svc.cluster.local  │    │    │
-│  │  └─────────────────────────────────────────────────────────────┘    │    │
-│  │  ┌─────────────────────────────────────────────────────────────┐    │    │
-│  │  │ HOSTS (remote pods):                                         │    │    │
-│  │  │   172.19.0.100 → mongodb-multi-rs-1-0.member1.mongodb.local │    │    │
-│  │  │   172.19.0.101 → mongodb-multi-rs-1-1.member1.mongodb.local │    │    │
-│  │  └─────────────────────────────────────────────────────────────┘    │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-│                                    │                                         │
-│                          iptables DNAT                                       │
-│                    172.19.0.100:27017 → member-ip:30200                     │
-│                    172.19.0.101:27017 → member-ip:30201                     │
-│                                    │                                         │
-└────────────────────────────────────┼────────────────────────────────────────┘
-                                     │
-                              Docker Network
-                                     │
-┌────────────────────────────────────┼────────────────────────────────────────┐
-│                           MEMBER CLUSTER                                     │
-│                                    │                                         │
-│                          NodePort Services                                   │
-│                         :30200 → mongodb-0                                   │
-│                         :30201 → mongodb-1                                   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Troubleshooting DNS
-
-```bash
-# Test DNS resolution from a pod in central cluster
-kubectl exec -it mongodb-multi-rs-0-0 -n mongodb-rs -c mongodb-enterprise-database -- \
-  getent hosts mongodb-multi-rs-1-0.member1.mongodb.local
-
-# Check CoreDNS configuration
-kubectl get configmap coredns -n kube-system -o yaml
-
-# Check iptables rules on the kind node
-docker exec mongodb-central-control-plane iptables -t nat -L OUTPUT -n -v
-
-# Test connectivity to remote cluster pod
-kubectl exec -it mongodb-multi-rs-0-0 -n mongodb-rs -c mongodb-enterprise-database -- \
-  curl -v telnet://mongodb-multi-rs-1-0.member1.mongodb.local:27017
-```
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| Docker Memory | 8 GB | 12 GB |
+| Docker CPUs | 4 cores | 6 cores |
+| Disk Space | 15 GB | 20 GB |
 
 ## Manual Deployment Steps
 
-### Step 1: Create Kind Clusters
+### Step 0: Reset Ops Manager Project (Required for Redeployment)
 
-Create two kind clusters - one central and one member:
+**Critical**: If you're redeploying to an existing Ops Manager project, you must reset the automation config first. Ops Manager retains TLS certificate hashes and replica set configuration from previous deployments, which will cause authentication failures.
+
+**Option A: Reset via Ops Manager API (Recommended)**
 
 ```bash
-# Create central cluster configuration (3 MongoDB nodes)
-cat > central-kind-config.yaml << EOF
+# Get your project ID from ops-manager-api-key.json
+PROJECT_ID=$(cat ops-manager-api-key.json | python -c "import sys,json; print(json.load(sys.stdin)['projects']['multiCluster']['projectId'])")
+PUBLIC_KEY=$(cat ops-manager-api-key.json | python -c "import sys,json; print(json.load(sys.stdin)['publicKey'])")
+PRIVATE_KEY=$(cat ops-manager-api-key.json | python -c "import sys,json; print(json.load(sys.stdin)['privateKey'])")
+
+# Get current automation config
+curl -k --digest -u "${PUBLIC_KEY}:${PRIVATE_KEY}" \
+  "https://localhost:8443/api/public/v1.0/groups/${PROJECT_ID}/automationConfig" \
+  -o /tmp/automation-config.json
+
+# Reset processes, replicaSets, and auth (using Python to modify JSON)
+python3 << 'PYEOF'
+import json
+with open('/tmp/automation-config.json', 'r') as f:
+    config = json.load(f)
+config['processes'] = []
+config['replicaSets'] = []
+config['sharding'] = []
+if 'auth' in config:
+    config['auth']['disabled'] = True
+    config['auth']['usersWanted'] = []
+if 'tls' in config:
+    config['tls'] = {'clientCertificateMode': 'OPTIONAL'}
+with open('/tmp/automation-config-reset.json', 'w') as f:
+    json.dump(config, f)
+PYEOF
+
+# Apply the reset config
+curl -k --digest -u "${PUBLIC_KEY}:${PRIVATE_KEY}" \
+  -X PUT -H "Content-Type: application/json" \
+  -d @/tmp/automation-config-reset.json \
+  "https://localhost:8443/api/public/v1.0/groups/${PROJECT_ID}/automationConfig"
+
+echo "Ops Manager automation config reset"
+```
+
+**Option B: Delete and Recreate Project in Ops Manager UI**
+
+1. Go to Ops Manager UI → Organization → Projects
+2. Delete the "MultiCluster" project
+3. Create a new project with the same name
+4. Update the `projectId` in `ops-manager-api-key.json` with the new project ID
+
+**Option C: Use a Fresh Project Name**
+
+Create a new project in Ops Manager with a different name and update the `ops-manager-connection` ConfigMap in Step 8.
+
+### Step 1: Create Kind Clusters
+
+```bash
+mkdir -p .kube-multi
+
+# Create central cluster configuration
+cat > .kube-multi/central-kind-config.yaml << 'EOF'
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
-name: mongodb-central
 nodes:
   - role: control-plane
     extraPortMappings:
@@ -213,11 +98,10 @@ nodes:
         protocol: TCP
 EOF
 
-# Create member cluster configuration (2 MongoDB nodes)
-cat > member-kind-config.yaml << EOF
+# Create member cluster configuration
+cat > .kube-multi/member-kind-config.yaml << 'EOF'
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
-name: mongodb-member-1
 nodes:
   - role: control-plane
     extraPortMappings:
@@ -229,125 +113,489 @@ nodes:
         protocol: TCP
 EOF
 
-# Create clusters
-kind create cluster --config central-kind-config.yaml --wait 120s
-kind create cluster --config member-kind-config.yaml --wait 120s
+# Create the clusters
+kind create cluster --name mongodb-central --config .kube-multi/central-kind-config.yaml --wait 120s
+kind create cluster --name mongodb-member-1 --config .kube-multi/member-kind-config.yaml --wait 120s
 
 # Export kubeconfigs
-kind get kubeconfig --name mongodb-central > central-config
-kind get kubeconfig --name mongodb-member-1 > member-config
+kind get kubeconfig --name mongodb-central > .kube-multi/central-config
+kind get kubeconfig --name mongodb-member-1 > .kube-multi/member-config
 ```
 
-### Step 2: Deploy Operator to Central Cluster
+### Step 2: Create Namespaces and Deploy CRDs
 
 ```bash
-# Set kubeconfig for central cluster
-export KUBECONFIG=./central-config
+export KUBECONFIG=./.kube-multi/central-config
 
-# Create namespaces
+# Create namespaces on central cluster
 kubectl create namespace mongodb
 kubectl create namespace mongodb-rs
 
 # Deploy CRDs
 kubectl apply -f https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/crds.yaml
 
-# Deploy operator
-kubectl apply -f https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/mongodb-enterprise.yaml
-
-# Configure operator to watch mongodb-rs namespace
-kubectl set env deployment/mongodb-enterprise-operator -n mongodb WATCH_NAMESPACE=mongodb-rs
-
-# Wait for operator to be ready
-kubectl wait --for=condition=available deployment/mongodb-enterprise-operator -n mongodb --timeout=180s
+# Create namespace on member cluster
+kubectl --kubeconfig ./.kube-multi/member-config create namespace mongodb-rs
 ```
 
-### Step 3: Deploy RBAC on Central Cluster
+### Step 3: Create Member List ConfigMap
+
+**Important**: Each cluster name must be a KEY with empty string value.
 
 ```bash
-export KUBECONFIG=./central-config
+export KUBECONFIG=./.kube-multi/central-config
 
-# Apply operator RBAC for mongodb-rs namespace
-kubectl apply -f k8s-multi/generated/operator-rbac.yaml
-
-# Apply database roles
-kubectl apply -f k8s-multi/generated/database-roles.yaml
-```
-
-### Step 4: Prepare Member Cluster
-
-```bash
-# Switch to member cluster
-export KUBECONFIG=./member-config
-
-# Create namespace
-kubectl create namespace mongodb-rs
-
-# Apply member cluster RBAC
-kubectl apply -f k8s-multi/generated/member-cluster-rbac.yaml
-
-# Apply database roles
-kubectl apply -f k8s-multi/generated/database-roles.yaml
-```
-
-### Step 5: Create Multi-Cluster Kubeconfig Secret
-
-The operator needs a kubeconfig with access to both clusters:
-
-```bash
-# Switch back to central cluster
-export KUBECONFIG=./central-config
-
-# Create combined kubeconfig (the script does this automatically)
-# For manual setup, merge both kubeconfigs and create secret:
-kubectl create secret generic mongodb-enterprise-operator-multi-cluster-kubeconfig \
-  -n mongodb \
-  --from-file=kubeconfig=./combined-kubeconfig.yaml
-```
-
-### Step 6: Create Member List ConfigMap
-
-```bash
-export KUBECONFIG=./central-config
-
-kubectl apply -f - << EOF
+kubectl apply -f - << 'EOF'
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mongodb-enterprise-operator-member-list
   namespace: mongodb
 data:
-  member-clusters: "mongodb-central,mongodb-member-1"
+  kind-mongodb-central: ""
+  kind-mongodb-member-1: ""
 EOF
 ```
 
-### Step 7: Create Ops Manager Credentials
+### Step 4: Create Multi-Cluster Kubeconfig Secret
+
+**Critical**: The operator requires this secret BEFORE it can start. The kubeconfig must use Docker network IPs.
 
 ```bash
-export KUBECONFIG=./central-config
+# Get Docker network IPs for the Kind control planes
+CENTRAL_IP=$(docker inspect mongodb-central-control-plane --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+MEMBER_IP=$(docker inspect mongodb-member-1-control-plane --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+echo "Central IP: $CENTRAL_IP, Member IP: $MEMBER_IP"
 
-# Apply generated secret (contains your API keys)
-kubectl apply -f k8s-multi/generated/ops-manager-secret.yaml
+# Get certificate data from both kubeconfigs
+CENTRAL_CA=$(kubectl --kubeconfig ./.kube-multi/central-config config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+CENTRAL_CERT=$(kubectl --kubeconfig ./.kube-multi/central-config config view --raw -o jsonpath='{.users[0].user.client-certificate-data}')
+CENTRAL_KEY=$(kubectl --kubeconfig ./.kube-multi/central-config config view --raw -o jsonpath='{.users[0].user.client-key-data}')
 
-# Apply ConfigMap with connection details
-kubectl apply -f k8s-multi/generated/ops-manager-configmap.yaml
+MEMBER_CA=$(kubectl --kubeconfig ./.kube-multi/member-config config view --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')
+MEMBER_CERT=$(kubectl --kubeconfig ./.kube-multi/member-config config view --raw -o jsonpath='{.users[0].user.client-certificate-data}')
+MEMBER_KEY=$(kubectl --kubeconfig ./.kube-multi/member-config config view --raw -o jsonpath='{.users[0].user.client-key-data}')
 
-# Apply CA certificate ConfigMap (if using self-signed certs)
-kubectl apply -f k8s-multi/generated/ops-manager-ca-configmap.yaml
+# Create combined kubeconfig with Docker network IPs (port 6443 is internal K8s API port)
+cat > .kube-multi/operator-kubeconfig.yaml << EOF
+apiVersion: v1
+kind: Config
+clusters:
+- name: kind-mongodb-central
+  cluster:
+    certificate-authority-data: ${CENTRAL_CA}
+    server: https://${CENTRAL_IP}:6443
+- name: kind-mongodb-member-1
+  cluster:
+    certificate-authority-data: ${MEMBER_CA}
+    server: https://${MEMBER_IP}:6443
+contexts:
+- name: kind-mongodb-central
+  context:
+    cluster: kind-mongodb-central
+    user: kind-mongodb-central
+- name: kind-mongodb-member-1
+  context:
+    cluster: kind-mongodb-member-1
+    user: kind-mongodb-member-1
+current-context: kind-mongodb-central
+users:
+- name: kind-mongodb-central
+  user:
+    client-certificate-data: ${CENTRAL_CERT}
+    client-key-data: ${CENTRAL_KEY}
+- name: kind-mongodb-member-1
+  user:
+    client-certificate-data: ${MEMBER_CERT}
+    client-key-data: ${MEMBER_KEY}
+EOF
+
+# Create the secret
+export KUBECONFIG=./.kube-multi/central-config
+kubectl create secret generic mongodb-enterprise-operator-multi-cluster-kubeconfig \
+  -n mongodb \
+  --from-file=kubeconfig=./.kube-multi/operator-kubeconfig.yaml
 ```
 
-### Step 8: Create TLS Certificates
+### Step 5: Deploy Multi-Cluster Operator
 
-Generate and deploy TLS certificates to both clusters:
+Now that the kubeconfig secret exists, deploy the operator:
 
 ```bash
-# Generate certificates (done by script, or manually with openssl)
-# The certificates need SANs for all MongoDB pod hostnames and external domains
+export KUBECONFIG=./.kube-multi/central-config
 
-# Apply CA ConfigMap to central cluster
-export KUBECONFIG=./central-config
-kubectl apply -f k8s-multi/generated/mongodb-ca-configmap.yaml
+# Deploy MULTI-CLUSTER operator
+kubectl apply -f https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/mongodb-enterprise-multi-cluster.yaml
 
-# Create TLS secrets on central cluster
+# Configure operator to watch mongodb-rs namespace
+kubectl set env deployment/mongodb-enterprise-operator-multi-cluster -n mongodb WATCH_NAMESPACE=mongodb-rs
+
+# Wait for operator to be ready
+kubectl wait --for=condition=available deployment/mongodb-enterprise-operator-multi-cluster -n mongodb --timeout=180s
+```
+
+### Step 6: Deploy RBAC on Central Cluster
+
+```bash
+export KUBECONFIG=./.kube-multi/central-config
+
+# Create operator RBAC for mongodb-rs namespace
+kubectl apply -f - << 'EOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mongodb-enterprise-operator
+  namespace: mongodb-rs
+rules:
+- apiGroups: [""]
+  resources: ["services", "secrets", "configmaps", "pods", "persistentvolumeclaims"]
+  verbs: ["*"]
+- apiGroups: ["apps"]
+  resources: ["statefulsets"]
+  verbs: ["*"]
+- apiGroups: ["mongodb.com"]
+  resources: ["*"]
+  verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mongodb-enterprise-operator
+  namespace: mongodb-rs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mongodb-enterprise-operator
+subjects:
+- kind: ServiceAccount
+  name: mongodb-enterprise-operator-multi-cluster
+  namespace: mongodb
+EOF
+
+# Create database service accounts and roles
+kubectl apply -f - << 'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mongodb-enterprise-database-pods
+  namespace: mongodb-rs
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mongodb-enterprise-appdb
+  namespace: mongodb-rs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mongodb-enterprise-database-pods
+  namespace: mongodb-rs
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["patch", "delete", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mongodb-enterprise-database-pods
+  namespace: mongodb-rs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mongodb-enterprise-database-pods
+subjects:
+- kind: ServiceAccount
+  name: mongodb-enterprise-database-pods
+  namespace: mongodb-rs
+EOF
+```
+
+### Step 7: Prepare Member Cluster
+
+```bash
+export KUBECONFIG=./.kube-multi/member-config
+
+# Create database service accounts and roles
+kubectl apply -f - << 'EOF'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mongodb-enterprise-database-pods
+  namespace: mongodb-rs
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mongodb-enterprise-appdb
+  namespace: mongodb-rs
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mongodb-enterprise-database-pods
+  namespace: mongodb-rs
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["patch", "delete", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mongodb-enterprise-database-pods
+  namespace: mongodb-rs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mongodb-enterprise-database-pods
+subjects:
+- kind: ServiceAccount
+  name: mongodb-enterprise-database-pods
+  namespace: mongodb-rs
+EOF
+```
+
+### Step 8: Create Ops Manager Credentials
+
+Replace placeholder values with your actual credentials from `ops-manager-api-key.json`:
+
+```bash
+export KUBECONFIG=./.kube-multi/central-config
+
+# Create Ops Manager API key secret
+kubectl apply -f - << 'EOF'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ops-manager-admin-key
+  namespace: mongodb-rs
+stringData:
+  publicKey: "YOUR_PUBLIC_KEY"
+  privateKey: "YOUR_PRIVATE_KEY"
+EOF
+
+# Create Ops Manager connection ConfigMap
+kubectl apply -f - << 'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ops-manager-connection
+  namespace: mongodb-rs
+data:
+  baseUrl: "https://host.docker.internal:8443"
+  projectName: "MultiCluster"
+  orgId: "YOUR_ORG_ID"
+  sslMMSCAConfigMap: "ops-manager-ca"
+  sslRequireValidMMSServerCertificates: "false"
+EOF
+
+# Create CA certificate ConfigMap for Ops Manager
+kubectl create configmap ops-manager-ca \
+  --from-file=mms-ca.crt=./certs/ca.crt \
+  -n mongodb-rs
+```
+
+### Step 9: Configure Cross-Cluster DNS (CoreDNS)
+
+**Critical**: Pods need to resolve external hostnames like `mongodb-multi-rs-0-0.central.mongodb.local`. This step configures CoreDNS for cross-cluster DNS resolution.
+
+```bash
+# Get ClusterIPs for MongoDB services (may need to be updated after pods are created)
+# For now, use virtual IPs that will be routed via iptables
+
+# Central cluster CoreDNS configuration:
+# - LOCAL pods: Rewrite central.mongodb.local to internal K8s DNS
+# - REMOTE pods: Map member1.mongodb.local to virtual IPs
+kubectl --kubeconfig ./.kube-multi/central-config apply -f - << 'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health {
+           lameduck 5s
+        }
+        ready
+        rewrite name mongodb-multi-rs-0-0.central.mongodb.local mongodb-multi-rs-0-0.mongodb-multi-rs-0-svc.mongodb-rs.svc.cluster.local
+        rewrite name mongodb-multi-rs-0-1.central.mongodb.local mongodb-multi-rs-0-1.mongodb-multi-rs-0-svc.mongodb-rs.svc.cluster.local
+        rewrite name mongodb-multi-rs-0-2.central.mongodb.local mongodb-multi-rs-0-2.mongodb-multi-rs-0-svc.mongodb-rs.svc.cluster.local
+        hosts {
+            172.19.0.100 mongodb-multi-rs-1-0.member1.mongodb.local
+            172.19.0.101 mongodb-multi-rs-1-1.member1.mongodb.local
+            fallthrough
+        }
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+           pods insecure
+           fallthrough in-addr.arpa ip6.arpa
+           ttl 30
+        }
+        prometheus :9153
+        forward . /etc/resolv.conf {
+           max_concurrent 1000
+        }
+        cache 30
+        loop
+        reload
+        loadbalance
+    }
+EOF
+
+# Member cluster CoreDNS configuration:
+# - LOCAL pods: Rewrite member1.mongodb.local to internal K8s DNS
+# - REMOTE pods: Map central.mongodb.local to virtual IPs
+kubectl --kubeconfig ./.kube-multi/member-config apply -f - << 'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health {
+           lameduck 5s
+        }
+        ready
+        rewrite name mongodb-multi-rs-1-0.member1.mongodb.local mongodb-multi-rs-1-0.mongodb-multi-rs-1-svc.mongodb-rs.svc.cluster.local
+        rewrite name mongodb-multi-rs-1-1.member1.mongodb.local mongodb-multi-rs-1-1.mongodb-multi-rs-1-svc.mongodb-rs.svc.cluster.local
+        hosts {
+            172.19.0.200 mongodb-multi-rs-0-0.central.mongodb.local
+            172.19.0.201 mongodb-multi-rs-0-1.central.mongodb.local
+            172.19.0.202 mongodb-multi-rs-0-2.central.mongodb.local
+            fallthrough
+        }
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+           pods insecure
+           fallthrough in-addr.arpa ip6.arpa
+           ttl 30
+        }
+        prometheus :9153
+        forward . /etc/resolv.conf {
+           max_concurrent 1000
+        }
+        cache 30
+        loop
+        reload
+        loadbalance
+    }
+EOF
+
+# Restart CoreDNS to pick up new config
+kubectl --kubeconfig ./.kube-multi/central-config rollout restart deployment/coredns -n kube-system
+kubectl --kubeconfig ./.kube-multi/member-config rollout restart deployment/coredns -n kube-system
+```
+
+### Step 10: Configure Cross-Cluster Network Routing (iptables)
+
+**Critical**: Route virtual IPs to NodePorts on the other cluster. This requires:
+- **PREROUTING** rules: For traffic from pods (different network namespace)
+- **OUTPUT** rules: For traffic from the node itself
+- **MASQUERADE** rule: So return traffic can find its way back
+
+```bash
+# Get Docker container names
+CENTRAL_CONTAINER="mongodb-central-control-plane"
+MEMBER_CONTAINER="mongodb-member-1-control-plane"
+
+# Get Docker IPs
+CENTRAL_IP=$(docker inspect $CENTRAL_CONTAINER --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+MEMBER_IP=$(docker inspect $MEMBER_CONTAINER --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+
+echo "Central IP: $CENTRAL_IP, Member IP: $MEMBER_IP"
+
+# On CENTRAL cluster: Route member virtual IPs to member cluster's NodePorts
+# PREROUTING for pod traffic, OUTPUT for node traffic
+docker exec $CENTRAL_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.100 -p tcp --dport 27017 -j DNAT --to-destination $MEMBER_IP:30200
+docker exec $CENTRAL_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.101 -p tcp --dport 27017 -j DNAT --to-destination $MEMBER_IP:30201
+docker exec $CENTRAL_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.100 -p tcp --dport 27017 -j DNAT --to-destination $MEMBER_IP:30200
+docker exec $CENTRAL_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.101 -p tcp --dport 27017 -j DNAT --to-destination $MEMBER_IP:30201
+
+# On MEMBER cluster: Route central virtual IPs to central cluster's NodePorts
+docker exec $MEMBER_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.200 -p tcp --dport 27017 -j DNAT --to-destination $CENTRAL_IP:30100
+docker exec $MEMBER_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.201 -p tcp --dport 27017 -j DNAT --to-destination $CENTRAL_IP:30101
+docker exec $MEMBER_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.202 -p tcp --dport 27017 -j DNAT --to-destination $CENTRAL_IP:30102
+docker exec $MEMBER_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.200 -p tcp --dport 27017 -j DNAT --to-destination $CENTRAL_IP:30100
+docker exec $MEMBER_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.201 -p tcp --dport 27017 -j DNAT --to-destination $CENTRAL_IP:30101
+docker exec $MEMBER_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.202 -p tcp --dport 27017 -j DNAT --to-destination $CENTRAL_IP:30102
+
+# Add MASQUERADE rule for return traffic (required for cross-cluster communication)
+docker exec $CENTRAL_CONTAINER iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || \
+  docker exec $CENTRAL_CONTAINER iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+docker exec $MEMBER_CONTAINER iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || \
+  docker exec $MEMBER_CONTAINER iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+
+echo "iptables rules configured"
+```
+
+### Step 11: Create TLS Certificates
+
+```bash
+mkdir -p certs/mongodb-multi
+
+# Create OpenSSL config
+cat > certs/mongodb-multi/mongodb-ext.cnf << 'EOF'
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+CN = mongodb-multi-rs
+
+[v3_req]
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth, clientAuth
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = mongodb-multi-rs-0-0.mongodb-multi-rs-svc.mongodb-rs.svc.cluster.local
+DNS.2 = mongodb-multi-rs-0-1.mongodb-multi-rs-svc.mongodb-rs.svc.cluster.local
+DNS.3 = mongodb-multi-rs-0-2.mongodb-multi-rs-svc.mongodb-rs.svc.cluster.local
+DNS.4 = mongodb-multi-rs-1-0.mongodb-multi-rs-svc.mongodb-rs.svc.cluster.local
+DNS.5 = mongodb-multi-rs-1-1.mongodb-multi-rs-svc.mongodb-rs.svc.cluster.local
+DNS.6 = mongodb-multi-rs-0-0.central.mongodb.local
+DNS.7 = mongodb-multi-rs-0-1.central.mongodb.local
+DNS.8 = mongodb-multi-rs-0-2.central.mongodb.local
+DNS.9 = mongodb-multi-rs-1-0.member1.mongodb.local
+DNS.10 = mongodb-multi-rs-1-1.member1.mongodb.local
+DNS.11 = mongodb-multi-rs-svc.mongodb-rs.svc.cluster.local
+DNS.12 = *.mongodb-multi-rs-svc.mongodb-rs.svc.cluster.local
+DNS.13 = localhost
+IP.1 = 127.0.0.1
+EOF
+
+# Generate server certificate
+openssl genrsa -out certs/mongodb-multi/mongodb.key 2048
+openssl req -new -key certs/mongodb-multi/mongodb.key \
+  -out certs/mongodb-multi/mongodb.csr \
+  -config certs/mongodb-multi/mongodb-ext.cnf
+openssl x509 -req -in certs/mongodb-multi/mongodb.csr \
+  -CA certs/ca.crt -CAkey certs/ca.key \
+  -CAcreateserial -out certs/mongodb-multi/mongodb.crt \
+  -days 365 -extensions v3_req \
+  -extfile certs/mongodb-multi/mongodb-ext.cnf
+
+# Deploy certificates to CENTRAL cluster
+export KUBECONFIG=./.kube-multi/central-config
+
+kubectl create configmap mongodb-ca \
+  --from-file=ca-pem=./certs/ca.crt \
+  -n mongodb-rs
+
 kubectl create secret tls mongodb-mongodb-multi-rs-cert \
   --cert=./certs/mongodb-multi/mongodb.crt \
   --key=./certs/mongodb-multi/mongodb.key \
@@ -358,9 +606,12 @@ kubectl create secret tls mongodb-mongodb-multi-rs-agent-certs \
   --key=./certs/mongodb-multi/mongodb.key \
   -n mongodb-rs
 
-# Apply to member cluster
-export KUBECONFIG=./member-config
-kubectl apply -f k8s-multi/generated/mongodb-ca-configmap.yaml
+# Deploy certificates to MEMBER cluster
+export KUBECONFIG=./.kube-multi/member-config
+
+kubectl create configmap mongodb-ca \
+  --from-file=ca-pem=./certs/ca.crt \
+  -n mongodb-rs
 
 kubectl create secret tls mongodb-mongodb-multi-rs-cert \
   --cert=./certs/mongodb-multi/mongodb.crt \
@@ -373,204 +624,400 @@ kubectl create secret tls mongodb-mongodb-multi-rs-agent-certs \
   -n mongodb-rs
 ```
 
-### Step 9: Deploy MongoDBMultiCluster Resource
+### Step 12: Pre-Create NodePort Services with Fixed Ports
+
+**Why pre-create services**: The MongoDB operator reuses existing services if they match the expected naming convention. By pre-creating services with fixed NodePorts, the operator preserves the port assignments instead of assigning random ports.
+
+**Important**: Each cluster needs only its own services. Apply only the relevant services to each cluster.
 
 ```bash
-export KUBECONFIG=./central-config
+# Apply CENTRAL cluster services (ports 30100, 30101, 30102)
+kubectl --kubeconfig ./.kube-multi/central-config apply -f - << 'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-multi-rs-0-0-svc-external
+  namespace: mongodb-rs
+  labels:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-0
+spec:
+  type: NodePort
+  ports:
+  - name: mongodb
+    port: 27017
+    targetPort: 27017
+    nodePort: 30100
+  selector:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-multi-rs-0-1-svc-external
+  namespace: mongodb-rs
+  labels:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-1
+spec:
+  type: NodePort
+  ports:
+  - name: mongodb
+    port: 27017
+    targetPort: 27017
+    nodePort: 30101
+  selector:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-multi-rs-0-2-svc-external
+  namespace: mongodb-rs
+  labels:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-2
+spec:
+  type: NodePort
+  ports:
+  - name: mongodb
+    port: 27017
+    targetPort: 27017
+    nodePort: 30102
+  selector:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-2
+EOF
 
-# Apply the MongoDBMultiCluster resource
-kubectl apply -f k8s-multi/generated/mongodb-multicluster.yaml
+# Apply MEMBER cluster services (ports 30200, 30201)
+kubectl --kubeconfig ./.kube-multi/member-config apply -f - << 'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-multi-rs-1-0-svc-external
+  namespace: mongodb-rs
+  labels:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-0
+spec:
+  type: NodePort
+  ports:
+  - name: mongodb
+    port: 27017
+    targetPort: 27017
+    nodePort: 30200
+  selector:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-multi-rs-1-1-svc-external
+  namespace: mongodb-rs
+  labels:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-1
+spec:
+  type: NodePort
+  ports:
+  - name: mongodb
+    port: 27017
+    targetPort: 27017
+    nodePort: 30201
+  selector:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-1
+EOF
+```
 
-# Watch the deployment progress
+### Step 13: Deploy MongoDBMultiCluster Resource
+
+```bash
+export KUBECONFIG=./.kube-multi/central-config
+
+kubectl apply -f - << 'EOF'
+apiVersion: mongodb.com/v1
+kind: MongoDBMultiCluster
+metadata:
+  name: mongodb-multi-rs
+  namespace: mongodb-rs
+spec:
+  version: "7.0.25-ent"
+  type: ReplicaSet
+
+  opsManager:
+    configMapRef:
+      name: ops-manager-connection
+
+  credentials: ops-manager-admin-key
+
+  clusterSpecList:
+    - clusterName: kind-mongodb-central
+      members: 3
+      externalAccess:
+        externalDomain: central.mongodb.local
+        externalService:
+          spec:
+            type: NodePort
+            port: 27017
+
+    - clusterName: kind-mongodb-member-1
+      members: 2
+      externalAccess:
+        externalDomain: member1.mongodb.local
+        externalService:
+          spec:
+            type: NodePort
+            port: 27017
+
+  connectivity:
+    replicaSetHorizons:
+      - "external": "localhost:30100"
+      - "external": "localhost:30101"
+      - "external": "localhost:30102"
+      - "external": "localhost:30200"
+      - "external": "localhost:30201"
+
+  agent:
+    startupOptions:
+      tlsRequireValidMMSServerCertificates: "false"
+
+  persistent: true
+
+  podSpec:
+    podTemplate:
+      spec:
+        containers:
+          - name: mongodb-enterprise-database
+            env:
+              - name: SSL_REQUIRE_VALID_MMS_CERTIFICATES
+                value: "false"
+            resources:
+              requests:
+                cpu: "500m"
+                memory: "1Gi"
+              limits:
+                cpu: "1"
+                memory: "2Gi"
+
+    persistence:
+      single:
+        storage: "5Gi"
+
+  security:
+    certsSecretPrefix: mongodb
+    tls:
+      ca: mongodb-ca
+    authentication:
+      enabled: true
+      modes: ["SCRAM", "X509"]
+      agents:
+        mode: SCRAM
+      ignoreUnknownUsers: true
+EOF
+
+# Watch the deployment
 kubectl get mongodbmulticluster -n mongodb-rs -w
 ```
 
-### Step 10: Create MongoDB User (Optional)
+### Step 14: Create MongoDB Users
+
+#### SCRAM User (Username/Password)
 
 ```bash
-export KUBECONFIG=./central-config
+export KUBECONFIG=./.kube-multi/central-config
 
-# Create password secret
-kubectl apply -f k8s-multi/generated/mongodb-user-secret.yaml
+kubectl apply -f - << 'EOF'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mongodb-admin-password
+  namespace: mongodb-rs
+stringData:
+  password: "YourSecurePassword123!"
+---
+apiVersion: mongodb.com/v1
+kind: MongoDBUser
+metadata:
+  name: admin
+  namespace: mongodb-rs
+spec:
+  passwordSecretKeyRef:
+    name: mongodb-admin-password
+    key: password
+  username: admin
+  db: admin
+  mongodbResourceRef:
+    name: mongodb-multi-rs
+    namespace: mongodb-rs
+  roles:
+    - db: admin
+      name: root
+EOF
+```
 
-# Create MongoDB user
-kubectl apply -f k8s-multi/generated/mongodb-user.yaml
+#### X509 User (Certificate-based)
+
+Generate a client certificate for X509 authentication:
+
+```bash
+# Create OpenSSL config for client certificate
+cat > certs/mongodb-multi/client-ext.cnf << 'EOF'
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+O = MongoDB
+OU = clients
+CN = x509-client
+
+[v3_req]
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth
+EOF
+
+# Generate client key and certificate
+openssl genrsa -out certs/mongodb-multi/client.key 2048
+openssl req -new -key certs/mongodb-multi/client.key \
+  -out certs/mongodb-multi/client.csr \
+  -config certs/mongodb-multi/client-ext.cnf
+openssl x509 -req -in certs/mongodb-multi/client.csr \
+  -CA certs/ca.crt -CAkey certs/ca.key \
+  -CAcreateserial -out certs/mongodb-multi/client.crt \
+  -days 365 -extensions v3_req \
+  -extfile certs/mongodb-multi/client-ext.cnf
+
+# Create combined PEM file for mongosh
+cat certs/mongodb-multi/client.crt certs/mongodb-multi/client.key > certs/mongodb-multi/client.pem
+```
+
+Create the X509 MongoDB user:
+
+```bash
+export KUBECONFIG=./.kube-multi/central-config
+
+kubectl apply -f - << 'EOF'
+apiVersion: mongodb.com/v1
+kind: MongoDBUser
+metadata:
+  name: mongodb-x509-user
+  namespace: mongodb-rs
+spec:
+  username: "CN=x509-client,OU=clients,O=MongoDB"
+  db: "$external"
+  mongodbResourceRef:
+    name: mongodb-multi-rs
+  roles:
+    - db: admin
+      name: clusterAdmin
+    - db: admin
+      name: userAdminAnyDatabase
+    - db: admin
+      name: readWriteAnyDatabase
+    - db: admin
+      name: dbAdminAnyDatabase
+EOF
 ```
 
 ## Monitoring Deployment
 
-### Check MongoDBMultiCluster Status
-
 ```bash
-# Central cluster
-export KUBECONFIG=./central-config
+export KUBECONFIG=./.kube-multi/central-config
 
+# Check MongoDBMultiCluster status
 kubectl get mongodbmulticluster -n mongodb-rs
-kubectl describe mongodbmulticluster mongodb-multi-rs -n mongodb-rs
-```
 
-### Check Pods on Both Clusters
-
-```bash
-# Central cluster pods
-export KUBECONFIG=./central-config
+# Check pods on both clusters
 kubectl get pods -n mongodb-rs
+kubectl --kubeconfig ./.kube-multi/member-config get pods -n mongodb-rs
 
-# Member cluster pods
-export KUBECONFIG=./member-config
-kubectl get pods -n mongodb-rs
-```
-
-### Check Operator Logs
-
-```bash
-export KUBECONFIG=./central-config
-kubectl logs -n mongodb -l app.kubernetes.io/name=mongodb-enterprise-operator --tail=100 -f
+# Check operator logs
+kubectl logs -n mongodb deployment/mongodb-enterprise-operator-multi-cluster --tail=100
 ```
 
 ## Connection Instructions
 
-Once the deployment is running, connect to MongoDB:
-
-### Using mongosh with SCRAM Authentication
+**Using SCRAM authentication:**
 
 ```bash
-# Connect to 5-node replica set (3 on central + 2 on member cluster)
 mongosh "mongodb://localhost:30100,localhost:30101,localhost:30102,localhost:30200,localhost:30201/?replicaSet=mongodb-multi-rs&tls=true&tlsCAFile=./certs/ca.crt" \
   --username admin \
   --authenticationDatabase admin
 ```
 
-### Using mongosh with TLS only
+**Using X509 authentication:**
 
 ```bash
-mongosh "mongodb://localhost:30100,localhost:30101,localhost:30102,localhost:30200,localhost:30201/?replicaSet=mongodb-multi-rs&tls=true&tlsCAFile=./certs/ca.crt&tlsAllowInvalidHostnames=true"
+mongosh "mongodb://localhost:30100,localhost:30101,localhost:30102,localhost:30200,localhost:30201/?replicaSet=mongodb-multi-rs&tls=true&tlsCAFile=./certs/ca.crt&authMechanism=MONGODB-X509&authSource=\$external" \
+  --tlsCertificateKeyFile ./certs/mongodb-multi/client.pem
 ```
-
-## Troubleshooting
-
-### Pods not starting on member cluster
-
-1. Check if RBAC is properly configured:
-   ```bash
-   export KUBECONFIG=./member-config
-   kubectl get serviceaccount -n mongodb-rs
-   kubectl get role,rolebinding -n mongodb-rs
-   ```
-
-2. Check if TLS secrets exist:
-   ```bash
-   kubectl get secrets -n mongodb-rs | grep mongodb
-   ```
-
-### Operator cannot connect to member cluster
-
-1. Verify kubeconfig secret:
-   ```bash
-   export KUBECONFIG=./central-config
-   kubectl get secret mongodb-enterprise-operator-multi-cluster-kubeconfig -n mongodb
-   ```
-
-2. Check operator logs for connection errors:
-   ```bash
-   kubectl logs -n mongodb -l app.kubernetes.io/name=mongodb-enterprise-operator | grep -i error
-   ```
-
-### MongoDB pods in CrashLoopBackOff
-
-1. Check pod logs:
-   ```bash
-   kubectl logs <pod-name> -n mongodb-rs -c mongodb-enterprise-database
-   ```
-
-2. Check agent logs:
-   ```bash
-   kubectl logs <pod-name> -n mongodb-rs -c mongodb-agent
-   ```
-
-3. Verify Ops Manager connectivity:
-   ```bash
-   kubectl exec -it <pod-name> -n mongodb-rs -c mongodb-enterprise-database -- \
-     curl -k https://host.docker.internal:8443/user/login
-   ```
 
 ## Cleanup
 
 ```bash
-# Delete both clusters
+export KUBECONFIG=./.kube-multi/central-config
+kubectl delete mongodbmulticluster mongodb-multi-rs -n mongodb-rs
+sleep 30
+
 kind delete cluster --name mongodb-central
 kind delete cluster --name mongodb-member-1
 
-# Or use the script
-python deploy_mongodb_k8s_multi.py --cleanup
+rm -rf .kube-multi/ certs/mongodb-multi/
 ```
 
-### Verify Cleanup
+## Troubleshooting
 
-After running cleanup, verify everything was removed:
+### Operator pod stuck in ContainerCreating
 
+The multi-cluster operator requires the kubeconfig secret BEFORE it starts:
 ```bash
-# Verify kind clusters are deleted
-kind get clusters
-# Should not show "mongodb-central" or "mongodb-member-1"
-
-# Verify Docker containers are removed
-docker ps -a | grep mongodb-
-# Should return empty (for kind containers)
-
-# Verify generated files (optional - remove if you want a fresh start)
-ls -la .kube-multi/
-ls -la k8s-multi/generated/
-ls -la certs/
-
-# Clean generated files for fresh start
-rm -rf .kube-multi/ k8s-multi/generated/ certs/
+kubectl get secret mongodb-enterprise-operator-multi-cluster-kubeconfig -n mongodb
 ```
 
-## File Reference
+### Operator not reconciling
 
-### Template Files (in `k8s-multi/`)
+Check operator logs:
+```bash
+kubectl logs -n mongodb deployment/mongodb-enterprise-operator-multi-cluster --tail=50
+```
 
-These are source templates with placeholders like `{{VARIABLE}}` that get processed by the deployment script:
+Verify member list ConfigMap format (cluster names as KEYS):
+```bash
+kubectl get configmap mongodb-enterprise-operator-member-list -n mongodb -o yaml
+```
 
-| Template File | Description | Apply To |
-|---------------|-------------|----------|
-| `namespace.yaml` | Operator namespace | Central |
-| `mongodb-rs-namespace.yaml` | ReplicaSet namespace | Both |
-| `mongodb-multicluster.yaml` | MongoDBMultiCluster resource template | Central |
-| `ops-manager-secret.yaml` | API credentials template | Central |
-| `ops-manager-configmap.yaml` | Connection config template | Central |
-| `ops-manager-ca-configmap.yaml` | CA certificate template | Central |
-| `operator-rbac.yaml` | Operator RBAC template | Central |
-| `database-roles.yaml` | Database pod roles template | Both |
-| `member-cluster-rbac.yaml` | RBAC for member clusters template | Member |
-| `kubeconfig-template.yaml` | Multi-cluster kubeconfig template | Central |
-| `member-list-configmap.yaml` | Cluster list template | Central |
-| `mongodb-ca-configmap.yaml` | MongoDB CA certificate template | Both |
-| `mongodb-user-secret.yaml` | User password template | Central |
-| `mongodb-user.yaml` | MongoDB user template | Central |
-| `coredns-configmap.yaml` | CoreDNS configuration template | Both |
+### Pods running but MongoDBMultiCluster stuck in Pending/Failed
 
-### Generated Files (in `k8s-multi/generated/`)
+This usually means cross-cluster connectivity is not working. Check:
 
-These files are created at runtime by the deployment script with placeholders replaced:
+1. **NodePorts not pre-created**: The iptables rules expect fixed NodePorts (30100-30102, 30200-30201). If you skipped Step 12, the operator assigns random ports. Either run Step 12 before deploying, or manually patch the services.
 
-| Generated File | Source Template |
-|----------------|-----------------|
-| `ops-manager-secret.yaml` | Filled with API keys from `ops-manager-api-key.json` |
-| `ops-manager-configmap.yaml` | Filled with Ops Manager URL, org ID, project name |
-| `mongodb-ca-configmap.yaml` | Filled with CA certificate content |
-| `kubeconfig-secret.yaml` | Filled with merged kubeconfig for both clusters |
-| `member-list-configmap.yaml` | Filled with cluster names |
-| `mongodb-multicluster.yaml` | Filled with replica set name, TLS settings |
+2. **Missing iptables PREROUTING rules**: Pod traffic goes through PREROUTING chain, not just OUTPUT. Verify both chains have rules:
+```bash
+docker exec mongodb-central-control-plane iptables -t nat -L PREROUTING -n | grep 172.19
+docker exec mongodb-central-control-plane iptables -t nat -L OUTPUT -n | grep 172.19
+```
 
-> **Note**: The `k8s-multi/generated/` directory is created by the script and excluded
-> from version control. If running manually, you must process the templates yourself
-> or use the generated files after running the script once.
+3. **Test cross-cluster connectivity from a pod**:
+```bash
+kubectl exec mongodb-multi-rs-0-0 -n mongodb-rs -c mongodb-enterprise-database -- \
+  bash -c "timeout 5 bash -c '</dev/tcp/172.19.0.100/27017' && echo OK || echo FAILED"
+```
 
-## References
+### Authentication failed - Certificate hash mismatch
 
-- [MongoDB Multi-Cluster Overview](https://www.mongodb.com/docs/kubernetes-operator/v1.33/multi-cluster-overview/)
-- [Deploy Multi-Cluster Without Service Mesh](https://www.mongodb.com/docs/kubernetes-operator/v1.33/multi-cluster-no-service-mesh-deploy-rs/)
-- [Multi-Cluster Prerequisites](https://www.mongodb.com/docs/kubernetes-operator/v1.33/multi-cluster-prerequisites/)
-- [MongoDBMultiCluster CRD Specification](https://www.mongodb.com/docs/kubernetes-operator/v1.33/reference/k8s-operator-multi-cluster-specification/)
+Error in operator logs: `Cannot read certificate file: /mongodb-automation/tls/<HASH>`
+
+This happens when Ops Manager has stale TLS certificate hashes from a previous deployment. Solution: Run Step 0 to reset the Ops Manager automation config.
+
+### CAFilePath error when enabling authentication
+
+Error: `The required attribute tls.CAFilePath or tls.CAFilePathWindows was not specified`
+
+This indicates the Ops Manager automation config needs to be reset. The old config has TLS settings that conflict with the new deployment.

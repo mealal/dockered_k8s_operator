@@ -30,7 +30,7 @@
 apiVersion: mongodb.com/v1
 kind: MongoDB
 metadata:
-  name: {{REPLICA_SET_NAME}}
+  name: mongodb-rs
   namespace: mongodb-rs
   labels:
     app.kubernetes.io/name: mongodb
@@ -63,7 +63,7 @@ spec:
     startupOptions:
       # TLS certificate validation for Ops Manager connection
       # Set to "false" only for testing with self-signed certificates
-      tlsRequireValidMMSServerCertificates: "{{TLS_REQUIRE_VALID_CERTS}}"
+      tlsRequireValidMMSServerCertificates: "false"
 
   # -----------------------------------------------------------------------------
   # External Connectivity Configuration (NodePort)
@@ -101,7 +101,7 @@ spec:
             env:
               # TLS certificate validation for agent download from Ops Manager
               - name: SSL_REQUIRE_VALID_MMS_CERTIFICATES
-                value: "{{SSL_REQUIRE_VALID_MMS_CERTS}}"
+                value: "false"
             resources:
               requests:
                 cpu: "500m"

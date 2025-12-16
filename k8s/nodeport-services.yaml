@@ -1,0 +1,72 @@
+# =============================================================================
+# Pre-Created NodePort Services for MongoDB ReplicaSet
+# =============================================================================
+#
+# These services are created BEFORE deploying the MongoDB ReplicaSet to ensure
+# fixed NodePort values. The MongoDB operator will reuse these services instead
+# of creating new ones with random ports.
+#
+# Apply BEFORE deploying MongoDB ReplicaSet:
+#   kubectl --kubeconfig .kube/config apply -f k8s/nodeport-services.yaml
+#
+# =============================================================================
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-rs-0-svc-external
+  namespace: mongodb-rs
+  labels:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-rs-0
+spec:
+  type: NodePort
+  ports:
+  - name: mongodb
+    port: 27017
+    targetPort: 27017
+    nodePort: 30000
+  selector:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-rs-0
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-rs-1-svc-external
+  namespace: mongodb-rs
+  labels:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-rs-1
+spec:
+  type: NodePort
+  ports:
+  - name: mongodb
+    port: 27017
+    targetPort: 27017
+    nodePort: 30001
+  selector:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-rs-1
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-rs-2-svc-external
+  namespace: mongodb-rs
+  labels:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-rs-2
+spec:
+  type: NodePort
+  ports:
+  - name: mongodb
+    port: 27017
+    targetPort: 27017
+    nodePort: 30002
+  selector:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-rs-2

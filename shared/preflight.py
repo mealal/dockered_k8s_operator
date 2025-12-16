@@ -119,12 +119,12 @@ class PreFlightChecker:
                 data = json.load(f)
 
             # Support both camelCase and snake_case field names
+            # Note: project_id is not required - it will be created on demand by K8s scripts
             required_field_variants = [
                 ('public_key', 'publicKey'),
                 ('private_key', 'privateKey'),
                 ('base_url', 'baseUrl'),
                 ('org_id', 'orgId'),
-                ('project_id', 'projectId'),
             ]
             missing = [
                 snake for snake, camel in required_field_variants

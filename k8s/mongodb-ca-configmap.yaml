@@ -23,7 +23,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mongodb-ca
-  namespace: {{RS_NAMESPACE}}
+  namespace: mongodb-rs
   labels:
     app.kubernetes.io/name: mongodb-ca
     app.kubernetes.io/component: tls

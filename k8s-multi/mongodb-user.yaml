@@ -10,7 +10,7 @@
 apiVersion: mongodb.com/v1
 kind: MongoDBUser
 metadata:
-  name: {{MONGODB_USERNAME}}
+  name: admin
   namespace: mongodb-rs
   labels:
     app.kubernetes.io/name: mongodb-user
@@ -20,10 +20,10 @@ spec:
   passwordSecretKeyRef:
     name: mongodb-admin-password
     key: password
-  username: {{MONGODB_USERNAME}}
+  username: admin
   db: admin
   mongodbResourceRef:
-    name: {{REPLICA_SET_NAME}}
+    name: mongodb-multi-rs
   roles:
     - db: admin
       name: root

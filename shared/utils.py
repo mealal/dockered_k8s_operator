@@ -114,6 +114,100 @@ def check_docker() -> bool:
         return False
 
 
+def find_openssl() -> str:
+    """Find OpenSSL executable, checking common Windows paths.
+
+    On Windows, OpenSSL is often installed via Git for Windows, Chocolatey,
+    or standalone installers. This function checks common locations before
+    falling back to PATH lookup.
+
+    Returns:
+        Path to openssl executable
+
+    Raises:
+        FileNotFoundError: If OpenSSL cannot be found
+    """
+    openssl_cmd = "openssl"
+
+    # On Windows, check common installation paths
+    if sys.platform == "win32":
+        common_paths = [
+            # Git for Windows (most common)
+            r"C:\Program Files\Git\mingw64\bin\openssl.exe",
+            r"C:\Program Files\Git\usr\bin\openssl.exe",
+            r"C:\Program Files (x86)\Git\mingw64\bin\openssl.exe",
+            # Standalone OpenSSL installations
+            r"C:\OpenSSL-Win64\bin\openssl.exe",
+            r"C:\OpenSSL-Win32\bin\openssl.exe",
+            r"C:\Program Files\OpenSSL-Win64\bin\openssl.exe",
+            # Chocolatey
+            r"C:\ProgramData\chocolatey\bin\openssl.exe",
+        ]
+
+        for path in common_paths:
+            if os.path.isfile(path):
+                return path
+
+        # Try to find via where command
+        try:
+            result = subprocess.run(
+                ["where", "openssl"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().split('\n')[0]
+        except Exception:
+            pass
+
+    # On non-Windows or if all else fails, verify it's in PATH
+    try:
+        subprocess.run(
+            [openssl_cmd, "version"],
+            capture_output=True, check=True, timeout=10
+        )
+        return openssl_cmd
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        raise FileNotFoundError(
+            "OpenSSL not found. Please install OpenSSL:\n"
+            "  - Windows: Install Git for Windows (includes OpenSSL) or download from https://slproweb.com/products/Win32OpenSSL.html\n"
+            "  - Linux: sudo apt-get install openssl\n"
+            "  - macOS: brew install openssl"
+        )
+
+
+def run_openssl(args: list, description: str) -> bool:
+    """Run an OpenSSL command with proper error logging.
+
+    Uses find_openssl() to locate the OpenSSL executable, which handles
+    Windows-specific paths (Git for Windows, Chocolatey, etc.).
+
+    Args:
+        args: Command arguments (without 'openssl' prefix)
+        description: Human-readable description of the operation
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        openssl_path = find_openssl()
+        cmd = [openssl_path] + args
+        subprocess.run(
+            cmd, check=True, capture_output=True, text=True,
+            encoding='utf-8', errors='replace'
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"OpenSSL {description} failed")
+        if e.stderr:
+            logger.error(f"OpenSSL stderr: {e.stderr.strip()}")
+        if e.stdout:
+            logger.debug(f"OpenSSL stdout: {e.stdout.strip()}")
+        return False
+    except FileNotFoundError as e:
+        logger.error(str(e))
+        return False
+
+
 def generate_secure_password(length: int = 16) -> str:
     """Generate a cryptographically secure password.
 

@@ -3,15 +3,130 @@ Base YAML Template Manager for MongoDB Kubernetes deployment scripts.
 
 Contains the common functionality shared between single-cluster and multi-cluster
 YAML managers, including template rendering, namespace substitution, and file management.
+
+Features:
+- Template caching for improved performance
+- Variable substitution with {{PLACEHOLDER}} syntax
+- Namespace-aware rendering
+- Post-processing hooks for custom transformations
 """
 
 import logging
 import re
 import shutil
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from threading import Lock
+from typing import Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+class TemplateCache:
+    """Thread-safe cache for template file contents.
+
+    Caches template files to avoid repeated disk reads during deployment.
+    Supports automatic invalidation based on file modification time.
+
+    Attributes:
+        max_size: Maximum number of templates to cache
+    """
+
+    def __init__(self, max_size: int = 50):
+        """Initialize the template cache.
+
+        Args:
+            max_size: Maximum number of templates to cache (LRU eviction)
+        """
+        self._cache: Dict[Path, Tuple[str, float]] = {}  # path -> (content, mtime)
+        self._lock = Lock()
+        self._max_size = max_size
+        self._access_order: List[Path] = []  # For LRU tracking
+
+    def get(self, path: Path) -> Optional[str]:
+        """Get cached template content if valid.
+
+        Args:
+            path: Path to template file
+
+        Returns:
+            Cached content if valid, None otherwise
+        """
+        with self._lock:
+            if path not in self._cache:
+                return None
+
+            content, cached_mtime = self._cache[path]
+
+            # Check if file has been modified
+            try:
+                current_mtime = path.stat().st_mtime
+                if current_mtime > cached_mtime:
+                    # File modified, invalidate cache
+                    del self._cache[path]
+                    self._access_order.remove(path)
+                    return None
+            except OSError:
+                # File no longer exists, invalidate
+                del self._cache[path]
+                if path in self._access_order:
+                    self._access_order.remove(path)
+                return None
+
+            # Update access order for LRU
+            self._access_order.remove(path)
+            self._access_order.append(path)
+
+            return content
+
+    def put(self, path: Path, content: str) -> None:
+        """Cache template content.
+
+        Args:
+            path: Path to template file
+            content: Template content to cache
+        """
+        with self._lock:
+            # Evict oldest if at capacity
+            while len(self._cache) >= self._max_size and self._access_order:
+                oldest = self._access_order.pop(0)
+                self._cache.pop(oldest, None)
+
+            try:
+                mtime = path.stat().st_mtime
+                self._cache[path] = (content, mtime)
+                self._access_order.append(path)
+            except OSError:
+                pass  # Don't cache if we can't get mtime
+
+    def invalidate(self, path: Optional[Path] = None) -> None:
+        """Invalidate cache entry or entire cache.
+
+        Args:
+            path: Specific path to invalidate, or None for all
+        """
+        with self._lock:
+            if path is None:
+                self._cache.clear()
+                self._access_order.clear()
+            elif path in self._cache:
+                del self._cache[path]
+                self._access_order.remove(path)
+
+    def stats(self) -> Dict[str, int]:
+        """Get cache statistics.
+
+        Returns:
+            Dict with 'size' and 'max_size' keys
+        """
+        with self._lock:
+            return {
+                "size": len(self._cache),
+                "max_size": self._max_size,
+            }
+
+
+# Global template cache instance (shared across managers)
+_template_cache = TemplateCache()
 
 
 class BaseYAMLTemplateManager:
@@ -26,15 +141,62 @@ class BaseYAMLTemplateManager:
         generated_dir: Directory for generated YAML files
     """
 
-    def __init__(self, template_dir: Path):
+    def __init__(self, template_dir: Path, use_cache: bool = True):
         """Initialize the YAML template manager.
 
         Args:
             template_dir: Directory containing YAML templates
+            use_cache: Whether to use template caching (default: True)
         """
         self.template_dir = template_dir
         self.generated_dir = template_dir / "generated"
+        self.use_cache = use_cache
         self._ensure_dirs()
+
+    def _read_template(self, template_path: Path) -> str:
+        """Read template content, using cache if enabled.
+
+        Args:
+            template_path: Path to template file
+
+        Returns:
+            Template content
+
+        Raises:
+            FileNotFoundError: If template doesn't exist
+        """
+        if not template_path.exists():
+            raise FileNotFoundError(f"Template not found: {template_path}")
+
+        # Try cache first
+        if self.use_cache:
+            cached = _template_cache.get(template_path)
+            if cached is not None:
+                logger.debug(f"Cache hit for template: {template_path.name}")
+                return cached
+
+        # Read from disk
+        content = template_path.read_text(encoding='utf-8')
+
+        # Cache for future use
+        if self.use_cache:
+            _template_cache.put(template_path, content)
+            logger.debug(f"Cached template: {template_path.name}")
+
+        return content
+
+    def clear_cache(self) -> None:
+        """Clear the template cache."""
+        _template_cache.invalidate()
+        logger.debug("Template cache cleared")
+
+    def get_cache_stats(self) -> Dict[str, int]:
+        """Get template cache statistics.
+
+        Returns:
+            Dict with cache size and max size
+        """
+        return _template_cache.stats()
 
     def _ensure_dirs(self) -> None:
         """Ensure template and generated directories exist."""
@@ -66,10 +228,7 @@ class BaseYAMLTemplateManager:
             ValueError: If unsubstituted placeholders remain
         """
         template_path = self.template_dir / template_name
-        if not template_path.exists():
-            raise FileNotFoundError(f"Template not found: {template_path}")
-
-        content = template_path.read_text(encoding='utf-8')
+        content = self._read_template(template_path)
 
         # Substitute variables
         for key, value in variables.items():
@@ -84,7 +243,8 @@ class BaseYAMLTemplateManager:
             content = post_process(content)
 
         # Check for unsubstituted placeholders - fail if any remain
-        remaining = re.findall(r'\{\{[A-Z_]+\}\}', content)
+        # Match both uppercase ({{FOO}}) and mixed-case ({{Foo_Bar}}) placeholders
+        remaining = re.findall(r'\{\{[A-Za-z_][A-Za-z0-9_]*\}\}', content)
         if remaining:
             raise ValueError(f"Unsubstituted placeholders in {template_name}: {remaining}")
 
@@ -112,7 +272,7 @@ class BaseYAMLTemplateManager:
             Path to the generated YAML file
         """
         template_path = self.template_dir / template_name
-        content = template_path.read_text(encoding='utf-8')
+        content = self._read_template(template_path)
 
         # Replace namespace name using regex to handle any default name
         content = re.sub(r'(name: )(mongodb(?:-rs)?)\n', f'\\g<1>{namespace}\n', content)
@@ -142,8 +302,9 @@ class BaseYAMLTemplateManager:
         self,
         namespace: str,
         base_url: str,
-        project_name: str,
+        project_id: str,
         org_id: str,
+        project_name: str,
         ssl_require_valid_certs: bool = True
     ) -> Path:
         """Render ops-manager-configmap.yaml with connection details.
@@ -151,8 +312,9 @@ class BaseYAMLTemplateManager:
         Args:
             namespace: Kubernetes namespace
             base_url: Ops Manager base URL
-            project_name: Ops Manager project name
+            project_id: Ops Manager project ID
             org_id: Ops Manager organization ID
+            project_name: Ops Manager project name (used by operator to find project)
             ssl_require_valid_certs: Whether to require valid SSL certificates
 
         Returns:
@@ -160,9 +322,10 @@ class BaseYAMLTemplateManager:
         """
         variables = {
             "BASE_URL": base_url,
+            "PROJECT_ID": project_id,
             "PROJECT_NAME": project_name,
             "ORG_ID": org_id,
-            "SSL_REQUIRE_VALID_CERTS": "true" if ssl_require_valid_certs else "false",
+            # SSL_REQUIRE_VALID_CERTS now hardcoded in template as 'false'
         }
 
         # Post-processor to remove CA ConfigMap reference when SSL verification is disabled
@@ -214,11 +377,12 @@ class BaseYAMLTemplateManager:
             post_process=embed_certificate
         )
 
-    def render_mongodb_ca_configmap(self, rs_namespace: str, ca_cert_path: Path) -> Path:
+    def render_mongodb_ca_configmap(self, ca_cert_path: Path) -> Path:
         """Render mongodb-ca-configmap.yaml with CA certificate.
 
+        Namespace (mongodb-rs) is hardcoded in the template for consistency.
+
         Args:
-            rs_namespace: Namespace where replica set will be deployed
             ca_cert_path: Path to CA certificate file
 
         Returns:
@@ -240,37 +404,35 @@ class BaseYAMLTemplateManager:
 
         return self._render_with_namespace(
             "mongodb-ca-configmap.yaml",
-            {"RS_NAMESPACE": rs_namespace},
+            {},  # RS_NAMESPACE now hardcoded in template
             post_process=embed_certificate
         )
 
-    def render_operator_rbac(self, rs_namespace: str, operator_namespace: str) -> Path:
-        """Render operator-rbac.yaml with namespace configuration.
+    def render_operator_rbac(self) -> Path:
+        """Render operator-rbac.yaml.
 
-        Args:
-            rs_namespace: Namespace for replica sets
-            operator_namespace: Namespace for the operator
+        Namespaces (mongodb-rs for replica sets, mongodb for operator) are
+        hardcoded in the template for consistency.
 
         Returns:
             Path to the generated YAML file
         """
         return self._render_with_namespace(
             "operator-rbac.yaml",
-            {"RS_NAMESPACE": rs_namespace, "OPERATOR_NAMESPACE": operator_namespace}
+            {}  # RS_NAMESPACE, OPERATOR_NAMESPACE hardcoded in template
         )
 
-    def render_database_roles(self, rs_namespace: str) -> Path:
-        """Render database-roles.yaml with namespace configuration.
+    def render_database_roles(self) -> Path:
+        """Render database-roles.yaml.
 
-        Args:
-            rs_namespace: Namespace for replica sets
+        Namespace (mongodb-rs) is hardcoded in the template for consistency.
 
         Returns:
             Path to the generated YAML file
         """
         return self._render_with_namespace(
             "database-roles.yaml",
-            {"RS_NAMESPACE": rs_namespace}
+            {}  # RS_NAMESPACE hardcoded in template
         )
 
     def render_user_secret(self, namespace: str, password: str) -> Path:
@@ -289,20 +451,38 @@ class BaseYAMLTemplateManager:
             namespace=namespace
         )
 
-    def render_user(self, namespace: str, username: str, rs_name: str) -> Path:
-        """Render mongodb-user.yaml with user configuration.
+    def render_user(self, namespace: str) -> Path:
+        """Render mongodb-user.yaml.
+
+        Username ('admin') and replica set name are hardcoded in the template
+        for consistency.
 
         Args:
-            namespace: Kubernetes namespace
-            username: MongoDB username
-            rs_name: Replica set name
+            namespace: Kubernetes namespace (used for namespace: field replacement)
 
         Returns:
             Path to the generated YAML file
         """
         return self._render_with_namespace(
             "mongodb-user.yaml",
-            {"MONGODB_USERNAME": username, "REPLICA_SET_NAME": rs_name},
+            {},  # MONGODB_USERNAME, REPLICA_SET_NAME hardcoded in template
+            namespace=namespace
+        )
+
+    def render_x509_user(self, namespace: str, x509_username: str, rs_name: str) -> Path:
+        """Render mongodb-x509-user.yaml with X509 user configuration.
+
+        Args:
+            namespace: Kubernetes namespace
+            x509_username: The certificate subject DN in RFC2253 format
+            rs_name: MongoDB replica set name
+
+        Returns:
+            Path to the generated YAML file
+        """
+        return self._render_with_namespace(
+            "mongodb-x509-user.yaml",
+            {"X509_USERNAME": x509_username, "REPLICA_SET_NAME": rs_name},
             namespace=namespace
         )
 
@@ -319,10 +499,7 @@ class BaseYAMLTemplateManager:
             FileNotFoundError: If kind cluster config template doesn't exist
         """
         template_path = self.template_dir / "kind-cluster-config.yaml"
-        if not template_path.exists():
-            raise FileNotFoundError(f"Kind cluster config template not found: {template_path}")
-
-        content = template_path.read_text(encoding='utf-8')
+        content = self._read_template(template_path)
 
         # Generate port mappings with proper indentation
         port_mappings = ""

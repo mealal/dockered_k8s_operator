@@ -1,55 +1,51 @@
 # =============================================================================
-# MongoDB User (SCRAM Authentication)
+# MongoDB X509 User
 # =============================================================================
 #
 # This MongoDBUser resource defines a database user that authenticates using
-# SCRAM (username/password). The operator will create this user in the MongoDB
+# X509 client certificates. The operator will create this user in the MongoDB
 # deployment and manage it through Ops Manager.
 #
-# Prerequisites:
-#   1. MongoDB deployment with SCRAM authentication enabled
-#   2. Password secret created (mongodb-admin-password)
+# The username MUST match the certificate's subject DN as extracted by MongoDB.
+# MongoDB extracts the DN in reverse order (most specific first): CN=...,OU=...,O=...
 #
-# Apply with: kubectl apply -f mongodb-user.yaml
+# Prerequisites:
+#   1. MongoDB deployment with X509 authentication enabled
+#   2. TLS enabled on the MongoDB deployment
+#   3. Client certificate generated with matching subject DN
+#
+# Apply with: kubectl apply -f mongodb-x509-user.yaml
 # =============================================================================
 
 apiVersion: mongodb.com/v1
 kind: MongoDBUser
 metadata:
-  name: mongodb-admin-user
+  name: mongodb-x509-user
   namespace: mongodb-rs
   labels:
-    app.kubernetes.io/name: mongodb-user
+    app.kubernetes.io/name: mongodb-x509-user
     app.kubernetes.io/component: user
     app.kubernetes.io/managed-by: deploy-mongodb-k8s
 spec:
-  # Username for SCRAM authentication
-  username: "admin"
+  # Username for X509 authentication
+  # Must match the certificate subject DN as extracted by MongoDB (most specific first)
+  # Example: CN=x509-user,OU=clients,O=MongoDB
+  username: "{{X509_USERNAME}}"
 
-  # Database where the user is created (typically "admin" for admin users)
-  db: "admin"
-
-  # Reference to the Secret containing the password
-  passwordSecretKeyRef:
-    name: mongodb-admin-password
-    key: password
+  # Database for X509 users is always $external
+  db: "$external"
 
   # Reference to the MongoDB resource this user belongs to
   mongodbResourceRef:
-    name: "mongodb-rs"
+    name: "{{REPLICA_SET_NAME}}"
 
   # Roles assigned to this user
-  # These determine what operations the user can perform
   roles:
-    # Cluster-wide administration
     - db: "admin"
       name: "clusterAdmin"
-    # User administration across all databases
     - db: "admin"
       name: "userAdminAnyDatabase"
-    # Read/write access to all databases
     - db: "admin"
       name: "readWriteAnyDatabase"
-    # Database administration across all databases
     - db: "admin"
       name: "dbAdminAnyDatabase"
