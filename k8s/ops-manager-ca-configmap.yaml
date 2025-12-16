@@ -29,7 +29,7 @@ metadata:
   # ConfigMap name - must match 'sslMMSCAConfigMap' in ops-manager-connection ConfigMap
   name: ops-manager-ca
   # Deploy to the replica set namespace where MongoDB pods run
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
   labels:
     app.kubernetes.io/name: ops-manager-ca
     app.kubernetes.io/component: ops-manager-ca

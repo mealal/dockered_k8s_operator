@@ -129,13 +129,13 @@ export KUBECONFIG=./.kube-multi/central-config
 
 # Create namespaces on central cluster
 kubectl create namespace mongodb
-kubectl create namespace mongodb-rs
+kubectl create namespace eksrsoppoc1d
 
 # Deploy CRDs
 kubectl apply -f https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/crds.yaml
 
 # Create namespace on member cluster
-kubectl --kubeconfig ./.kube-multi/member-config create namespace mongodb-rs
+kubectl --kubeconfig ./.kube-multi/member-config create namespace eksrsoppoc1d
 ```
 
 ### Step 3: Create Member List ConfigMap
@@ -227,8 +227,8 @@ export KUBECONFIG=./.kube-multi/central-config
 # Deploy MULTI-CLUSTER operator
 kubectl apply -f https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/mongodb-enterprise-multi-cluster.yaml
 
-# Configure operator to watch mongodb-rs namespace
-kubectl set env deployment/mongodb-enterprise-operator-multi-cluster -n mongodb WATCH_NAMESPACE=mongodb-rs
+# Configure operator to watch eksrsoppoc1d namespace
+kubectl set env deployment/mongodb-enterprise-operator-multi-cluster -n mongodb WATCH_NAMESPACE=eksrsoppoc1d
 
 # Wait for operator to be ready
 kubectl wait --for=condition=available deployment/mongodb-enterprise-operator-multi-cluster -n mongodb --timeout=180s
@@ -239,13 +239,13 @@ kubectl wait --for=condition=available deployment/mongodb-enterprise-operator-mu
 ```bash
 export KUBECONFIG=./.kube-multi/central-config
 
-# Create operator RBAC for mongodb-rs namespace
+# Create operator RBAC for eksrsoppoc1d namespace
 kubectl apply -f - << 'EOF'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: mongodb-enterprise-operator
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 rules:
 - apiGroups: [""]
   resources: ["services", "secrets", "configmaps", "pods", "persistentvolumeclaims"]
@@ -261,7 +261,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: mongodb-enterprise-operator
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -278,19 +278,19 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: mongodb-enterprise-database-pods
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: mongodb-enterprise-appdb
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: mongodb-enterprise-database-pods
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 rules:
 - apiGroups: [""]
   resources: ["secrets"]
@@ -303,7 +303,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: mongodb-enterprise-database-pods
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -311,7 +311,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: mongodb-enterprise-database-pods
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 EOF
 ```
 
@@ -326,19 +326,19 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: mongodb-enterprise-database-pods
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: mongodb-enterprise-appdb
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: mongodb-enterprise-database-pods
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 rules:
 - apiGroups: [""]
   resources: ["secrets"]
@@ -351,7 +351,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: mongodb-enterprise-database-pods
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -359,7 +359,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: mongodb-enterprise-database-pods
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 EOF
 ```
 
@@ -376,7 +376,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: ops-manager-admin-key
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 stringData:
   publicKey: "YOUR_PUBLIC_KEY"
   privateKey: "YOUR_PRIVATE_KEY"
@@ -388,7 +388,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: ops-manager-connection
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 data:
   baseUrl: "https://host.docker.internal:8443"
   projectName: "MultiCluster"
@@ -400,7 +400,7 @@ EOF
 # Create CA certificate ConfigMap for Ops Manager
 kubectl create configmap ops-manager-ca \
   --from-file=mms-ca.crt=./certs/ca.crt \
-  -n mongodb-rs
+  -n eksrsoppoc1d
 ```
 
 ### Step 9: Configure Cross-Cluster DNS (CoreDNS)
@@ -594,34 +594,34 @@ export KUBECONFIG=./.kube-multi/central-config
 
 kubectl create configmap mongodb-ca \
   --from-file=ca-pem=./certs/ca.crt \
-  -n mongodb-rs
+  -n eksrsoppoc1d
 
 kubectl create secret tls mongodb-mongodb-multi-rs-cert \
   --cert=./certs/mongodb-multi/mongodb.crt \
   --key=./certs/mongodb-multi/mongodb.key \
-  -n mongodb-rs
+  -n eksrsoppoc1d
 
 kubectl create secret tls mongodb-mongodb-multi-rs-agent-certs \
   --cert=./certs/mongodb-multi/mongodb.crt \
   --key=./certs/mongodb-multi/mongodb.key \
-  -n mongodb-rs
+  -n eksrsoppoc1d
 
 # Deploy certificates to MEMBER cluster
 export KUBECONFIG=./.kube-multi/member-config
 
 kubectl create configmap mongodb-ca \
   --from-file=ca-pem=./certs/ca.crt \
-  -n mongodb-rs
+  -n eksrsoppoc1d
 
 kubectl create secret tls mongodb-mongodb-multi-rs-cert \
   --cert=./certs/mongodb-multi/mongodb.crt \
   --key=./certs/mongodb-multi/mongodb.key \
-  -n mongodb-rs
+  -n eksrsoppoc1d
 
 kubectl create secret tls mongodb-mongodb-multi-rs-agent-certs \
   --cert=./certs/mongodb-multi/mongodb.crt \
   --key=./certs/mongodb-multi/mongodb.key \
-  -n mongodb-rs
+  -n eksrsoppoc1d
 ```
 
 ### Step 12: Pre-Create NodePort Services with Fixed Ports
@@ -637,7 +637,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: mongodb-multi-rs-0-0-svc-external
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
   labels:
     controller: mongodb-enterprise-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-0
@@ -656,7 +656,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: mongodb-multi-rs-0-1-svc-external
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
   labels:
     controller: mongodb-enterprise-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-1
@@ -675,7 +675,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: mongodb-multi-rs-0-2-svc-external
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
   labels:
     controller: mongodb-enterprise-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-2
@@ -697,7 +697,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: mongodb-multi-rs-1-0-svc-external
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
   labels:
     controller: mongodb-enterprise-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-0
@@ -716,7 +716,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: mongodb-multi-rs-1-1-svc-external
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
   labels:
     controller: mongodb-enterprise-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-1
@@ -743,7 +743,7 @@ apiVersion: mongodb.com/v1
 kind: MongoDBMultiCluster
 metadata:
   name: mongodb-multi-rs
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 spec:
   version: "7.0.25-ent"
   type: ReplicaSet
@@ -820,7 +820,7 @@ spec:
 EOF
 
 # Watch the deployment
-kubectl get mongodbmulticluster -n mongodb-rs -w
+kubectl get mongodbmulticluster -n eksrsoppoc1d -w
 ```
 
 ### Step 14: Create MongoDB Users
@@ -835,7 +835,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: mongodb-admin-password
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 stringData:
   password: "YourSecurePassword123!"
 ---
@@ -843,7 +843,7 @@ apiVersion: mongodb.com/v1
 kind: MongoDBUser
 metadata:
   name: admin
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 spec:
   passwordSecretKeyRef:
     name: mongodb-admin-password
@@ -852,7 +852,7 @@ spec:
   db: admin
   mongodbResourceRef:
     name: mongodb-multi-rs
-    namespace: mongodb-rs
+    namespace: eksrsoppoc1d
   roles:
     - db: admin
       name: root
@@ -907,7 +907,7 @@ apiVersion: mongodb.com/v1
 kind: MongoDBUser
 metadata:
   name: mongodb-x509-user
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 spec:
   username: "CN=x509-client,OU=clients,O=MongoDB"
   db: "$external"
@@ -931,11 +931,11 @@ EOF
 export KUBECONFIG=./.kube-multi/central-config
 
 # Check MongoDBMultiCluster status
-kubectl get mongodbmulticluster -n mongodb-rs
+kubectl get mongodbmulticluster -n eksrsoppoc1d
 
 # Check pods on both clusters
-kubectl get pods -n mongodb-rs
-kubectl --kubeconfig ./.kube-multi/member-config get pods -n mongodb-rs
+kubectl get pods -n eksrsoppoc1d
+kubectl --kubeconfig ./.kube-multi/member-config get pods -n eksrsoppoc1d
 
 # Check operator logs
 kubectl logs -n mongodb deployment/mongodb-enterprise-operator-multi-cluster --tail=100
@@ -962,7 +962,7 @@ mongosh "mongodb://localhost:30100,localhost:30101,localhost:30102,localhost:302
 
 ```bash
 export KUBECONFIG=./.kube-multi/central-config
-kubectl delete mongodbmulticluster mongodb-multi-rs -n mongodb-rs
+kubectl delete mongodbmulticluster mongodb-multi-rs -n eksrsoppoc1d
 sleep 30
 
 kind delete cluster --name mongodb-central
@@ -1006,7 +1006,7 @@ docker exec mongodb-central-control-plane iptables -t nat -L OUTPUT -n | grep 17
 
 3. **Test cross-cluster connectivity from a pod**:
 ```bash
-kubectl exec mongodb-multi-rs-0-0 -n mongodb-rs -c mongodb-enterprise-database -- \
+kubectl exec mongodb-multi-rs-0-0 -n eksrsoppoc1d -c mongodb-enterprise-database -- \
   bash -c "timeout 5 bash -c '</dev/tcp/172.19.0.100/27017' && echo OK || echo FAILED"
 ```
 

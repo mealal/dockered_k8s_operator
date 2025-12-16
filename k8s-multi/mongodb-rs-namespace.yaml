@@ -12,7 +12,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: mongodb-rs
+  name: eksrsoppoc1d
   labels:
     app.kubernetes.io/name: mongodb-multicluster
     app.kubernetes.io/component: database-namespace

@@ -26,7 +26,7 @@ metadata:
   # ConfigMap name - referenced by MongoDB resources via 'opsManager.configMapRef'
   name: ops-manager-connection
   # Deploy to the replica set namespace where MongoDB pods run
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
   labels:
     app.kubernetes.io/name: ops-manager-connection
     app.kubernetes.io/component: ops-manager-connection

@@ -328,7 +328,7 @@ koperator_poc/
 
 The deployment uses separate namespaces for better isolation:
 - `mongodb` - Kubernetes operator
-- `mongodb-rs` - MongoDB replica set pods
+- `eksrsoppoc1d` - MongoDB replica set pods
 
 ### Security Features (Always Enabled)
 
@@ -465,7 +465,7 @@ docker ps -a | grep mongodb-k8s      # Should return empty
 
 > **Note**: Namespace values are hardcoded to match YAML templates:
 > - Operator namespace: `mongodb` (k8s/namespace.yaml)
-> - Replica set namespace: `mongodb-rs` (k8s/mongodb-rs-namespace.yaml)
+> - Replica set namespace: `eksrsoppoc1d` (k8s/mongodb-rs-namespace.yaml)
 
 ### deploy_mongodb_k8s_multi.py
 
@@ -613,7 +613,7 @@ python deploy_mongodb_k8s.py --ssl-skip-verify --skip-preflight
 **Cause:** Usually resource constraints or scheduling issues.
 
 ```bash
-kubectl --kubeconfig .kube/config describe pod mongodb-rs-0 -n mongodb-rs
+kubectl --kubeconfig .kube/config describe pod mongodb-rs-0 -n eksrsoppoc1d
 ```
 
 Check for events mentioning insufficient CPU, memory, or PVC issues.
@@ -631,26 +631,26 @@ kubectl --kubeconfig .kube/config logs -n mongodb \
 
 ```bash
 # Database container logs
-kubectl --kubeconfig .kube/config logs -n mongodb-rs \
+kubectl --kubeconfig .kube/config logs -n eksrsoppoc1d \
   mongodb-rs-0 -c mongodb-enterprise-database
 
 # Agent logs
-kubectl --kubeconfig .kube/config logs -n mongodb-rs \
+kubectl --kubeconfig .kube/config logs -n eksrsoppoc1d \
   mongodb-rs-0 -c mongodb-agent
 ```
 
 ### Check Replica Set Status
 
 ```bash
-kubectl --kubeconfig .kube/config get mongodb -n mongodb-rs
-kubectl --kubeconfig .kube/config get pods -n mongodb-rs
-kubectl --kubeconfig .kube/config describe mongodb mongodb-rs -n mongodb-rs
+kubectl --kubeconfig .kube/config get mongodb -n eksrsoppoc1d
+kubectl --kubeconfig .kube/config get pods -n eksrsoppoc1d
+kubectl --kubeconfig .kube/config describe mongodb mongodb-rs -n eksrsoppoc1d
 ```
 
 ### Check External Services
 
 ```bash
-kubectl --kubeconfig .kube/config get svc -n mongodb-rs | grep external
+kubectl --kubeconfig .kube/config get svc -n eksrsoppoc1d | grep external
 ```
 
 ### Connection Issues
@@ -658,7 +658,7 @@ kubectl --kubeconfig .kube/config get svc -n mongodb-rs | grep external
 If you can't connect via external ports, use port-forwarding as a fallback:
 
 ```bash
-kubectl --kubeconfig .kube/config port-forward -n mongodb-rs mongodb-rs-0 27017:27017
+kubectl --kubeconfig .kube/config port-forward -n eksrsoppoc1d mongodb-rs-0 27017:27017
 ```
 
 ## Documentation

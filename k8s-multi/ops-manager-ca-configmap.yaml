@@ -13,7 +13,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: ops-manager-ca
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
   labels:
     app.kubernetes.io/name: ops-manager-ca
     app.kubernetes.io/component: certificate

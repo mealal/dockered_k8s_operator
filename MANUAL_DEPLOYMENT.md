@@ -29,66 +29,27 @@ Before starting, ensure you have:
 
 ### Verify Prerequisites
 
-Run these commands to verify your environment is ready:
-
 ```bash
 # Check Docker is running
 docker version
 
-# Check kubectl (optional - can use Docker-based kubectl)
+# Check kubectl
 kubectl version --client
 
 # Check OpenSSL
 openssl version
 
-# Verify Ops Manager is accessible (adjust URL as needed)
+# Verify Ops Manager is accessible
 curl -k https://localhost:8443/user/login
 ```
 
-Expected output shows version numbers for each tool. If any command fails, install the missing component before proceeding.
-
-## Directory Structure
-
-```
-koperator_poc/
-│
-├── k8s/                              # Kubernetes YAML templates
-│   ├── namespace.yaml                # Operator namespace
-│   ├── mongodb-rs-namespace.yaml     # Replica set namespace
-│   ├── ops-manager-secret.yaml       # API credentials secret template
-│   ├── ops-manager-configmap.yaml    # Ops Manager connection config template
-│   ├── ops-manager-ca-configmap.yaml # Ops Manager CA certificate template
-│   ├── operator-rbac.yaml            # Operator RBAC template
-│   ├── database-roles.yaml           # Database pod service accounts template
-│   ├── mongodb-replicaset.yaml       # MongoDB ReplicaSet definition
-│   ├── mongodb-user.yaml             # SCRAM user template
-│   ├── mongodb-user-secret.yaml      # User password secret template
-│   ├── mongodb-x509-user.yaml        # X509 user template
-│   └── mongodb-ca-configmap.yaml     # MongoDB CA certificate template
-│
-├── certs/                            # TLS certificates (you create these)
-│   ├── ca.crt                        # CA certificate
-│   ├── ca.key                        # CA private key
-│   └── mongodb/                      # MongoDB-specific certificates
-│       ├── mongodb.crt               # Server certificate
-│       ├── mongodb.key               # Server private key
-│       ├── client.crt                # Client certificate (X509)
-│       ├── client.key                # Client private key
-│       └── client.pem                # Combined client cert+key
-├── .kube/                            # Kubeconfig directory
-│   ├── kind-config.yaml              # Kind cluster configuration
-│   └── config                        # Kubeconfig file for kind cluster
-└── ops-manager-api-key.json          # Ops Manager credentials (you create this)
-```
-
-> **Note**: Files in `k8s/` are templates containing placeholders like `{{VARIABLE}}`.
-> You must replace these placeholders with actual values before applying the YAML files.
+---
 
 ## Step 1: Create Kubernetes Cluster with kind
 
 ### 1.1 Create kind configuration file
 
-Create `.kube/kind-config.yaml` with port mappings for external access:
+Create `.kube/kind-config.yaml`:
 
 ```yaml
 kind: Cluster
@@ -97,7 +58,6 @@ name: mongodb-k8s
 nodes:
   - role: control-plane
     extraPortMappings:
-      # External access ports for MongoDB replica set members
       - containerPort: 30000
         hostPort: 30000
         protocol: TCP
@@ -121,182 +81,272 @@ kind get kubeconfig --name mongodb-k8s > .kube/config
 
 # Verify cluster
 kubectl --kubeconfig .kube/config cluster-info
-```
-
-**Verification checkpoint:**
-```bash
-# Expected: Shows cluster running at https://127.0.0.1:xxxxx
 kubectl --kubeconfig .kube/config get nodes
-# Expected: Shows 2 nodes (control-plane and worker) in Ready state
 ```
 
-**If this step fails:**
-- Check Docker is running: `docker info`
-- Check available memory: `docker stats --no-stream`
-- Delete failed cluster and retry: `kind delete cluster --name mongodb-k8s`
+---
 
 ## Step 2: Deploy MongoDB Enterprise Kubernetes Operator
 
-### 2.1 Create namespaces
+### 2.1 Create Operator Namespace
 
-Create two namespaces: one for the operator, one for the replica set.
+Save as `namespace.yaml` and apply:
 
-```bash
-kubectl --kubeconfig .kube/config create namespace mongodb
-kubectl --kubeconfig .kube/config create namespace mongodb-rs
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mongodb
+  labels:
+    app.kubernetes.io/name: mongodb-operator
+    app.kubernetes.io/component: operator-namespace
 ```
 
-Or use the provided templates:
-
 ```bash
-kubectl --kubeconfig .kube/config apply -f k8s/namespace.yaml
-kubectl --kubeconfig .kube/config apply -f k8s/mongodb-rs-namespace.yaml
+kubectl --kubeconfig .kube/config apply -f namespace.yaml
 ```
 
-### 2.2 Deploy CRDs (Custom Resource Definitions)
+### 2.2 Create Replica Set Namespace
+
+Save as `mongodb-rs-namespace.yaml` and apply:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: eksrsoppoc1d
+  labels:
+    app.kubernetes.io/name: mongodb-replicaset
+    app.kubernetes.io/component: database-namespace
+```
+
+```bash
+kubectl --kubeconfig .kube/config apply -f mongodb-rs-namespace.yaml
+```
+
+### 2.3 Deploy CRDs
 
 ```bash
 kubectl --kubeconfig .kube/config apply -f \
   https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/crds.yaml
 ```
 
-### 2.3 Deploy the Operator
+### 2.4 Deploy the Operator
 
 ```bash
 kubectl --kubeconfig .kube/config apply -f \
   https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/mongodb-enterprise.yaml
 ```
 
-### 2.4 Configure Operator to Watch mongodb-rs Namespace
-
-Since the replica set will be deployed in a separate `mongodb-rs` namespace, configure the operator to watch that namespace:
+### 2.5 Configure Operator to Watch eksrsoppoc1d Namespace
 
 ```bash
-# Set WATCH_NAMESPACE environment variable
 kubectl --kubeconfig .kube/config set env deployment/mongodb-enterprise-operator \
-  -n mongodb WATCH_NAMESPACE=mongodb-rs
+  -n mongodb WATCH_NAMESPACE=eksrsoppoc1d
 ```
 
-### 2.5 Create RBAC for Operator in mongodb-rs Namespace
+### 2.6 Create RBAC for Operator
 
-The `k8s/operator-rbac.yaml` template has namespaces hardcoded (`mongodb` for operator, `mongodb-rs` for replica sets). Apply directly:
+Save as `operator-rbac.yaml` and apply:
 
-```bash
-kubectl --kubeconfig .kube/config apply -f k8s/operator-rbac.yaml
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mongodb-enterprise-operator
+  namespace: eksrsoppoc1d
+rules:
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, create, update, delete, watch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, create, update, delete, watch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, create, update, delete, watch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, create, update, delete, watch]
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    verbs: [get, list, create, update, delete, watch]
+  - apiGroups: [mongodb.com]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mongodb-enterprise-operator
+  namespace: eksrsoppoc1d
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mongodb-enterprise-operator
+subjects:
+  - kind: ServiceAccount
+    name: mongodb-enterprise-operator
+    namespace: mongodb
 ```
 
-### 2.6 Create Database Roles
-
-The `k8s/database-roles.yaml` template has namespace hardcoded (`mongodb-rs`). Apply directly:
-
 ```bash
-kubectl --kubeconfig .kube/config apply -f k8s/database-roles.yaml
+kubectl --kubeconfig .kube/config apply -f operator-rbac.yaml
 ```
 
-### 2.7 Verify operator deployment
+### 2.7 Create Database Roles
+
+Save as `database-roles.yaml` and apply:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mongodb-enterprise-database-pods
+  namespace: eksrsoppoc1d
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mongodb-enterprise-appdb
+  namespace: eksrsoppoc1d
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mongodb-enterprise-database-pods
+  namespace: eksrsoppoc1d
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [patch, delete, get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mongodb-enterprise-database-pods
+  namespace: eksrsoppoc1d
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mongodb-enterprise-database-pods
+subjects:
+  - kind: ServiceAccount
+    name: mongodb-enterprise-database-pods
+    namespace: eksrsoppoc1d
+```
 
 ```bash
-kubectl --kubeconfig .kube/config get pods -n mongodb
+kubectl --kubeconfig .kube/config apply -f database-roles.yaml
+```
 
-# Wait for operator to be ready
+### 2.8 Verify Operator Deployment
+
+```bash
 kubectl --kubeconfig .kube/config wait --for=condition=available \
   deployment/mongodb-enterprise-operator -n mongodb --timeout=180s
-```
 
-**Verification checkpoint:**
-```bash
 kubectl --kubeconfig .kube/config get pods -n mongodb
-# Expected: mongodb-enterprise-operator-xxxxx in Running state (1/1 Ready)
 ```
 
-**If operator is not starting:**
-- Check operator logs: `kubectl --kubeconfig .kube/config logs -n mongodb -l app.kubernetes.io/name=mongodb-enterprise-operator`
-- Verify RBAC is applied: `kubectl --kubeconfig .kube/config get role,rolebinding -n mongodb-rs`
+---
 
 ## Step 3: Configure Ops Manager Connection
 
-### 3.1 Create Ops Manager credentials secret
+### 3.1 Create Ops Manager Credentials Secret
 
-Edit `k8s/ops-manager-secret.yaml` and replace the following placeholders:
+Save as `ops-manager-secret.yaml` and apply (replace placeholders):
 
-| Placeholder | Description |
-|------------|-------------|
-| `{{PUBLIC_KEY}}` | Your Ops Manager API public key (e.g., "szkhfxdt") |
-| `{{PRIVATE_KEY}}` | Your Ops Manager API private key (e.g., "9fdfe594-fcc0-4517-93fd-e51f7dc3ea35") |
-
-You can use sed to replace the placeholders:
-
-```bash
-cat k8s/ops-manager-secret.yaml | \
-  sed "s/{{PUBLIC_KEY}}/YOUR_PUBLIC_KEY/g; \
-       s/{{PRIVATE_KEY}}/YOUR_PRIVATE_KEY/g" | \
-  kubectl --kubeconfig .kube/config apply -f -
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ops-manager-admin-key
+  namespace: eksrsoppoc1d
+stringData:
+  # Replace with your Ops Manager API public key
+  publicKey: "YOUR_PUBLIC_KEY"
+  # Replace with your Ops Manager API private key
+  privateKey: "YOUR_PRIVATE_KEY"
 ```
 
-Or edit the file directly and apply:
-
 ```bash
-kubectl --kubeconfig .kube/config apply -f k8s/ops-manager-secret.yaml
+kubectl --kubeconfig .kube/config apply -f ops-manager-secret.yaml
 ```
 
-### 3.2 Create Ops Manager connection ConfigMap
+### 3.2 Create Ops Manager Connection ConfigMap
 
-Edit `k8s/ops-manager-configmap.yaml` and replace the following placeholders:
+Save as `ops-manager-configmap.yaml` and apply (replace placeholders):
 
-| Placeholder | Example Value | Description |
-|------------|---------------|-------------|
-| `{{BASE_URL}}` | `https://host.docker.internal:8443` | Ops Manager URL (use host.docker.internal from kind) |
-| `{{PROJECT_NAME}}` | `SingleCluster` | Ops Manager Project Name (must match existing project) |
-| `{{PROJECT_ID}}` | `your-project-id` | Ops Manager Project ID (optional, for reference) |
-| `{{ORG_ID}}` | `your-org-id` | Ops Manager Organization ID |
-| `{{SSL_REQUIRE_VALID_CERTS}}` | `false` | Set to `false` for self-signed certs |
-
-You can use sed to replace the placeholders:
-
-```bash
-cat k8s/ops-manager-configmap.yaml | \
-  sed "s|{{BASE_URL}}|https://host.docker.internal:8443|g; \
-       s/{{PROJECT_NAME}}/SingleCluster/g; \
-       s/{{PROJECT_ID}}/YOUR_PROJECT_ID/g; \
-       s/{{ORG_ID}}/YOUR_ORG_ID/g; \
-       s/{{SSL_REQUIRE_VALID_CERTS}}/false/g" | \
-  kubectl --kubeconfig .kube/config apply -f -
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ops-manager-connection
+  namespace: eksrsoppoc1d
+data:
+  # Ops Manager URL (use host.docker.internal from kind cluster)
+  baseUrl: "https://host.docker.internal:8443"
+  # Your Ops Manager project name
+  projectName: "SingleCluster"
+  # Your Ops Manager project ID
+  projectId: "YOUR_PROJECT_ID"
+  # Your Ops Manager organization ID
+  orgId: "YOUR_ORG_ID"
+  # ConfigMap containing CA certificate
+  sslMMSCAConfigMap: "ops-manager-ca"
+  # Set to false for self-signed certs (testing only)
+  sslRequireValidMMSServerCertificates: "false"
 ```
 
-Or edit the file directly and apply:
-
 ```bash
-kubectl --kubeconfig .kube/config apply -f k8s/ops-manager-configmap.yaml
+kubectl --kubeconfig .kube/config apply -f ops-manager-configmap.yaml
 ```
 
-### 3.3 Create CA certificate ConfigMap (for Ops Manager)
+### 3.3 Create CA Certificate ConfigMap
 
-The CA certificate ConfigMap requires the certificate content. You can either:
-
-**Option A: Edit the template directly**
-
-Edit `k8s/ops-manager-ca-configmap.yaml` and replace `{{CA_CERTIFICATE}}` with your CA certificate content (properly indented).
-
-**Option B: Create from file (recommended)**
+**Option A: Create from file (recommended)**
 
 ```bash
 kubectl --kubeconfig .kube/config create configmap ops-manager-ca \
   --from-file=mms-ca.crt=./certs/ca.crt \
-  -n mongodb-rs
+  -n eksrsoppoc1d
 ```
 
-> **Important**: The key MUST be named `mms-ca.crt` - this is required by the operator.
+**Option B: Save as `ops-manager-ca-configmap.yaml`**
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ops-manager-ca
+  namespace: eksrsoppoc1d
+data:
+  # IMPORTANT: Key must be 'mms-ca.crt'
+  # Paste your CA certificate content here (PEM format)
+  mms-ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    YOUR_CA_CERTIFICATE_CONTENT_HERE
+    -----END CERTIFICATE-----
+```
+
+```bash
+kubectl --kubeconfig .kube/config apply -f ops-manager-ca-configmap.yaml
+```
+
+---
 
 ## Step 4: Generate TLS Certificates for MongoDB
 
 ### 4.1 Generate Server Certificates
 
-Create certificates for MongoDB server with proper SANs:
-
 ```bash
 mkdir -p certs/mongodb
 
-# Create OpenSSL config for MongoDB server
+# Create OpenSSL config
 cat > certs/mongodb/mongodb-ext.cnf << 'EOF'
 [req]
 distinguished_name = req_distinguished_name
@@ -313,25 +363,22 @@ extendedKeyUsage = serverAuth, clientAuth
 subjectAltName = @alt_names
 
 [alt_names]
-DNS.1 = mongodb-rs-0.mongodb-rs-svc.mongodb-rs.svc.cluster.local
-DNS.2 = mongodb-rs-1.mongodb-rs-svc.mongodb-rs.svc.cluster.local
-DNS.3 = mongodb-rs-2.mongodb-rs-svc.mongodb-rs.svc.cluster.local
-DNS.4 = mongodb-rs-svc.mongodb-rs.svc.cluster.local
-DNS.5 = *.mongodb-rs-svc.mongodb-rs.svc.cluster.local
+DNS.1 = mongodb-rs-0.mongodb-rs-svc.eksrsoppoc1d.svc.cluster.local
+DNS.2 = mongodb-rs-1.mongodb-rs-svc.eksrsoppoc1d.svc.cluster.local
+DNS.3 = mongodb-rs-2.mongodb-rs-svc.eksrsoppoc1d.svc.cluster.local
+DNS.4 = mongodb-rs-svc.eksrsoppoc1d.svc.cluster.local
+DNS.5 = *.mongodb-rs-svc.eksrsoppoc1d.svc.cluster.local
 DNS.6 = localhost
 IP.1 = 127.0.0.1
-IP.2 = ::1
 EOF
 
-# Generate server key
+# Generate server key and certificate
 openssl genrsa -out certs/mongodb/mongodb.key 2048
 
-# Generate server CSR
 openssl req -new -key certs/mongodb/mongodb.key \
   -out certs/mongodb/mongodb.csr \
   -config certs/mongodb/mongodb-ext.cnf
 
-# Sign with CA
 openssl x509 -req -in certs/mongodb/mongodb.csr \
   -CA certs/ca.crt -CAkey certs/ca.key \
   -CAcreateserial -out certs/mongodb/mongodb.crt \
@@ -342,7 +389,6 @@ openssl x509 -req -in certs/mongodb/mongodb.csr \
 ### 4.2 Generate Client Certificate (for X509 Authentication)
 
 ```bash
-# Create OpenSSL config for client certificate
 cat > certs/mongodb/client-ext.cnf << 'EOF'
 [req]
 distinguished_name = req_distinguished_name
@@ -360,161 +406,307 @@ keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = clientAuth
 EOF
 
-# Generate client key
 openssl genrsa -out certs/mongodb/client.key 2048
 
-# Generate client CSR
 openssl req -new -key certs/mongodb/client.key \
   -out certs/mongodb/client.csr \
   -config certs/mongodb/client-ext.cnf
 
-# Sign with CA
 openssl x509 -req -in certs/mongodb/client.csr \
   -CA certs/ca.crt -CAkey certs/ca.key \
   -CAcreateserial -out certs/mongodb/client.crt \
   -days 365 -extensions v3_req \
   -extfile certs/mongodb/client-ext.cnf
 
-# Create combined PEM file for mongosh
+# Create combined PEM for mongosh
 cat certs/mongodb/client.crt certs/mongodb/client.key > certs/mongodb/client.pem
 ```
 
 ### 4.3 Create TLS Secrets in Kubernetes
 
 ```bash
-# Create MongoDB CA ConfigMap (required key: ca-pem)
+# MongoDB CA ConfigMap (key must be 'ca-pem')
 kubectl --kubeconfig .kube/config create configmap mongodb-ca \
   --from-file=ca-pem=./certs/ca.crt \
-  -n mongodb-rs
+  -n eksrsoppoc1d
 
-# Create server TLS secret
+# Server TLS secret
 kubectl --kubeconfig .kube/config create secret tls mongodb-mongodb-rs-cert \
   --cert=./certs/mongodb/mongodb.crt \
   --key=./certs/mongodb/mongodb.key \
-  -n mongodb-rs
+  -n eksrsoppoc1d
 
-# Create agent TLS secret (same cert for simplicity)
+# Agent TLS secret
 kubectl --kubeconfig .kube/config create secret tls mongodb-mongodb-rs-agent-certs \
   --cert=./certs/mongodb/mongodb.crt \
   --key=./certs/mongodb/mongodb.key \
-  -n mongodb-rs
+  -n eksrsoppoc1d
 ```
 
-## Step 5: Pre-Create NodePort Services with Fixed Ports
+---
 
-**Why pre-create services**: The MongoDB operator reuses existing services if they match the expected naming convention. By pre-creating services with fixed NodePorts, the operator preserves the port assignments instead of assigning random ports.
+## Step 5: Pre-Create NodePort Services
+
+Save as `nodeport-services.yaml` and apply:
+
+```yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-rs-0-svc-external
+  namespace: eksrsoppoc1d
+  labels:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-rs-0
+spec:
+  type: NodePort
+  ports:
+  - name: mongodb
+    port: 27017
+    targetPort: 27017
+    nodePort: 30000
+  selector:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-rs-0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-rs-1-svc-external
+  namespace: eksrsoppoc1d
+  labels:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-rs-1
+spec:
+  type: NodePort
+  ports:
+  - name: mongodb
+    port: 27017
+    targetPort: 27017
+    nodePort: 30001
+  selector:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-rs-1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-rs-2-svc-external
+  namespace: eksrsoppoc1d
+  labels:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-rs-2
+spec:
+  type: NodePort
+  ports:
+  - name: mongodb
+    port: 27017
+    targetPort: 27017
+    nodePort: 30002
+  selector:
+    controller: mongodb-enterprise-operator
+    statefulset.kubernetes.io/pod-name: mongodb-rs-2
+```
 
 ```bash
-kubectl --kubeconfig .kube/config apply -f k8s/nodeport-services.yaml
+kubectl --kubeconfig .kube/config apply -f nodeport-services.yaml
 ```
 
-This creates NodePort services with fixed ports (30000, 30001, 30002) matching the Kind cluster's port mappings.
+---
 
 ## Step 6: Deploy MongoDB ReplicaSet
 
-### 6.1 Configure the ReplicaSet
+### 6.1 Deploy the ReplicaSet
 
-The `k8s/mongodb-replicaset.yaml` template has all values hardcoded for consistency. No placeholders need to be replaced.
+Save as `mongodb-replicaset.yaml` and apply:
 
-> **Template Design**: All configuration values including replica set name (`mongodb-rs`),
-> member count (`members: 3`), MongoDB version (`7.0.25-ent`), resource limits, storage size,
-> ports, and authentication modes are hardcoded in the template. To customize these values,
-> edit the template directly.
+```yaml
+apiVersion: mongodb.com/v1
+kind: MongoDB
+metadata:
+  name: mongodb-rs
+  namespace: eksrsoppoc1d
+spec:
+  members: 3
+  version: "7.0.25-ent"
+  type: ReplicaSet
 
-The following values are defined directly in the template:
+  opsManager:
+    configMapRef:
+      name: ops-manager-connection
 
-| Setting | Default Value | Location in Template |
-|---------|---------------|----------------------|
-| Replica Set Name | `mongodb-rs` | `metadata.name` |
-| Members | `3` | `spec.members` |
-| Version | `7.0.25-ent` | `spec.version` |
-| External Ports | `30000, 30001, 30002` | `spec.connectivity.replicaSetHorizons` |
-| CPU Request | `500m` | `spec.podSpec.podTemplate.spec.containers[].resources` |
-| Memory Request | `1Gi` | `spec.podSpec.podTemplate.spec.containers[].resources` |
-| Storage | `5Gi` | `spec.podSpec.persistence.single.storage` |
-| Auth Modes | `["SCRAM", "X509"]` | `spec.security.authentication.modes` |
+  credentials: ops-manager-admin-key
 
-### 6.2 Apply the ReplicaSet configuration
+  agent:
+    startupOptions:
+      tlsRequireValidMMSServerCertificates: "false"
 
-```bash
-kubectl --kubeconfig .kube/config apply -f k8s/mongodb-replicaset.yaml
+  externalAccess:
+    externalService:
+      spec:
+        type: NodePort
+
+  connectivity:
+    replicaSetHorizons:
+      - "external": "localhost:30000"
+      - "external": "localhost:30001"
+      - "external": "localhost:30002"
+
+  persistent: true
+
+  podSpec:
+    podTemplate:
+      spec:
+        containers:
+          - name: mongodb-enterprise-database
+            env:
+              - name: SSL_REQUIRE_VALID_MMS_CERTIFICATES
+                value: "false"
+            resources:
+              requests:
+                cpu: "500m"
+                memory: "1Gi"
+              limits:
+                cpu: "1"
+                memory: "2Gi"
+    persistence:
+      single:
+        storage: "5Gi"
+
+  security:
+    certsSecretPrefix: mongodb
+    tls:
+      ca: mongodb-ca
+    authentication:
+      enabled: true
+      modes: ["SCRAM", "X509"]
+      agents:
+        mode: SCRAM
+      ignoreUnknownUsers: true
 ```
 
-### 6.3 Create MongoDB Users
-
-#### SCRAM User (Username/Password)
-
-Edit `k8s/mongodb-user-secret.yaml` and replace:
-- `{{MONGODB_USER_PASSWORD}}` -> Your desired password
-
-The `k8s/mongodb-user.yaml` template has username (`admin`) and replica set name (`mongodb-rs`) hardcoded.
-
-Apply:
-
 ```bash
-kubectl --kubeconfig .kube/config apply -f k8s/mongodb-user-secret.yaml
-kubectl --kubeconfig .kube/config apply -f k8s/mongodb-user.yaml
+kubectl --kubeconfig .kube/config apply -f mongodb-replicaset.yaml
 ```
 
-#### X509 User (Certificate-based)
+### 6.2 Create MongoDB User Password Secret
 
-Edit `k8s/mongodb-x509-user.yaml` and replace:
-- `{{X509_USERNAME}}` -> `CN=x509-client,OU=clients,O=MongoDB`
-- `{{REPLICA_SET_NAME}}` -> `mongodb-rs`
+Save as `mongodb-user-secret.yaml` and apply (replace password):
 
-Apply:
-
-```bash
-kubectl --kubeconfig .kube/config apply -f k8s/mongodb-x509-user.yaml
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mongodb-admin-password
+  namespace: eksrsoppoc1d
+type: Opaque
+stringData:
+  # Replace with a secure password
+  password: "YourSecurePassword123!"
 ```
 
-### 6.4 Monitor deployment progress
+```bash
+kubectl --kubeconfig .kube/config apply -f mongodb-user-secret.yaml
+```
+
+### 6.3 Create SCRAM User
+
+Save as `mongodb-user.yaml` and apply:
+
+```yaml
+apiVersion: mongodb.com/v1
+kind: MongoDBUser
+metadata:
+  name: mongodb-admin-user
+  namespace: eksrsoppoc1d
+spec:
+  username: "admin"
+  db: "admin"
+  passwordSecretKeyRef:
+    name: mongodb-admin-password
+    key: password
+  mongodbResourceRef:
+    name: "mongodb-rs"
+  roles:
+    - db: "admin"
+      name: "clusterAdmin"
+    - db: "admin"
+      name: "userAdminAnyDatabase"
+    - db: "admin"
+      name: "readWriteAnyDatabase"
+    - db: "admin"
+      name: "dbAdminAnyDatabase"
+```
+
+```bash
+kubectl --kubeconfig .kube/config apply -f mongodb-user.yaml
+```
+
+### 6.4 Create X509 User
+
+Save as `mongodb-x509-user.yaml` and apply:
+
+```yaml
+apiVersion: mongodb.com/v1
+kind: MongoDBUser
+metadata:
+  name: mongodb-x509-user
+  namespace: eksrsoppoc1d
+spec:
+  # Must match certificate subject DN (most specific first)
+  username: "CN=x509-client,OU=clients,O=MongoDB"
+  db: "$external"
+  mongodbResourceRef:
+    name: "mongodb-rs"
+  roles:
+    - db: "admin"
+      name: "clusterAdmin"
+    - db: "admin"
+      name: "userAdminAnyDatabase"
+    - db: "admin"
+      name: "readWriteAnyDatabase"
+    - db: "admin"
+      name: "dbAdminAnyDatabase"
+```
+
+```bash
+kubectl --kubeconfig .kube/config apply -f mongodb-x509-user.yaml
+```
+
+### 6.5 Monitor Deployment
 
 ```bash
 # Watch MongoDB resource status
-kubectl --kubeconfig .kube/config get mongodb -n mongodb-rs -w
+kubectl --kubeconfig .kube/config get mongodb -n eksrsoppoc1d -w
 
 # Check pod status
-kubectl --kubeconfig .kube/config get pods -n mongodb-rs -w
+kubectl --kubeconfig .kube/config get pods -n eksrsoppoc1d -w
 
 # View detailed status
-kubectl --kubeconfig .kube/config describe mongodb mongodb-rs -n mongodb-rs
+kubectl --kubeconfig .kube/config describe mongodb mongodb-rs -n eksrsoppoc1d
 ```
 
-### 6.5 View logs for troubleshooting
-
-```bash
-# Operator logs
-kubectl --kubeconfig .kube/config logs -n mongodb \
-  -l app.kubernetes.io/name=mongodb-enterprise-operator
-
-# MongoDB pod logs
-kubectl --kubeconfig .kube/config logs -n mongodb-rs \
-  -l app=mongodb-rs-svc -c mongodb-enterprise-database
-
-# Automation agent logs
-kubectl --kubeconfig .kube/config logs -n mongodb-rs \
-  -l app=mongodb-rs-svc -c mongodb-agent
-```
+---
 
 ## Step 7: Verify Deployment
 
-### 7.1 Check MongoDB status
+### 7.1 Check MongoDB Status
 
 ```bash
-kubectl --kubeconfig .kube/config get mongodb -n mongodb-rs
+kubectl --kubeconfig .kube/config get mongodb -n eksrsoppoc1d
 ```
 
-Expected output when ready:
+Expected output:
 ```
 NAME         PHASE     VERSION       TYPE         AGE
 mongodb-rs   Running   7.0.25-ent   ReplicaSet   10m
 ```
 
-### 7.2 Check all pods are running
+### 7.2 Check Pods
 
 ```bash
-kubectl --kubeconfig .kube/config get pods -n mongodb-rs
+kubectl --kubeconfig .kube/config get pods -n eksrsoppoc1d
 ```
 
 Expected output:
@@ -525,17 +717,10 @@ mongodb-rs-1   2/2     Running   0          8m
 mongodb-rs-2   2/2     Running   0          6m
 ```
 
-### 7.3 Check external services
+### 7.3 Check Services
 
 ```bash
-kubectl --kubeconfig .kube/config get svc -n mongodb-rs | grep external
-```
-
-Expected output:
-```
-mongodb-rs-0-svc-external   NodePort   10.96.x.x   <none>   27017:3xxxx/TCP   10m
-mongodb-rs-1-svc-external   NodePort   10.96.x.x   <none>   27017:3xxxx/TCP   8m
-mongodb-rs-2-svc-external   NodePort   10.96.x.x   <none>   27017:3xxxx/TCP   6m
+kubectl --kubeconfig .kube/config get svc -n eksrsoppoc1d | grep external
 ```
 
 ### 7.4 Connect to MongoDB
@@ -555,132 +740,56 @@ mongosh "mongodb://localhost:30000,localhost:30001,localhost:30002/?replicaSet=m
   --tlsCertificateKeyFile ./certs/mongodb/client.pem
 ```
 
-### 7.5 Verify in Ops Manager
-
-1. Open Ops Manager: https://localhost:8443
-2. Navigate to your project
-3. You should see the replica set with all members healthy
+---
 
 ## Troubleshooting
 
 ### Common Issues
 
 #### 1. Pods stuck in Pending state
-
-Check if there are resource constraints:
 ```bash
-kubectl --kubeconfig .kube/config describe pod mongodb-rs-0 -n mongodb-rs
+kubectl --kubeconfig .kube/config describe pod mongodb-rs-0 -n eksrsoppoc1d
 ```
 
 #### 2. Agent cannot connect to Ops Manager
-
-Verify the Ops Manager URL is accessible from inside the cluster:
 ```bash
 kubectl --kubeconfig .kube/config run -it --rm debug \
   --image=curlimages/curl --restart=Never -- \
   curl -k https://host.docker.internal:8443/user/login
 ```
 
-#### 3. TLS certificate errors
-
-Ensure the CA certificate is correctly configured:
+#### 3. View Operator Logs
 ```bash
-kubectl --kubeconfig .kube/config get configmap mongodb-ca -n mongodb-rs -o yaml
+kubectl --kubeconfig .kube/config logs -n mongodb \
+  -l app.kubernetes.io/name=mongodb-enterprise-operator
 ```
 
-The key must be `ca-pem`.
-
-#### 4. Binary download failures
-
-If agents can't download MongoDB binaries, ensure Ops Manager is configured for Hybrid Mode:
-- `automation.versions.source=hybrid` in Ops Manager config
-- Ops Manager must be able to download binaries from MongoDB
-
-#### 5. External connectivity not working
-
-Check that kind port mappings are configured:
+#### 4. View MongoDB Pod Logs
 ```bash
-docker port mongodb-k8s-control-plane
+kubectl --kubeconfig .kube/config logs -n eksrsoppoc1d \
+  -l app=mongodb-rs-svc -c mongodb-enterprise-database
 ```
 
-Should show ports 30000, 30001, 30002 mapped.
-
-### Useful Commands
-
-```bash
-# Get events for debugging
-kubectl --kubeconfig .kube/config get events -n mongodb-rs --sort-by='.lastTimestamp'
-
-# Exec into a pod for debugging
-kubectl --kubeconfig .kube/config exec -it mongodb-rs-0 -n mongodb-rs -c mongodb-enterprise-database -- bash
-
-# Port-forward to MongoDB (fallback if external access not working)
-kubectl --kubeconfig .kube/config port-forward -n mongodb-rs mongodb-rs-0 27017:27017
-
-# Delete and recreate (clean start)
-kubectl --kubeconfig .kube/config delete mongodb mongodb-rs -n mongodb-rs
-kubectl --kubeconfig .kube/config apply -f k8s/mongodb-replicaset.yaml
-```
+---
 
 ## Cleanup
 
-> **Important**: Follow this order to ensure proper cleanup and avoid orphaned resources in Ops Manager.
-
-### Step 1: Remove MongoDB deployment (wait for Ops Manager deregistration)
-
 ```bash
-# Delete the MongoDB CRD first - this triggers agent deregistration
-kubectl --kubeconfig .kube/config delete -f k8s/mongodb-replicaset.yaml
+# Delete MongoDB resources
+kubectl --kubeconfig .kube/config delete -f mongodb-replicaset.yaml
+kubectl --kubeconfig .kube/config wait --for=delete pod -l app=mongodb-rs-svc -n eksrsoppoc1d --timeout=180s
 
-# Wait for pods to terminate (allows agents to deregister from Ops Manager)
-kubectl --kubeconfig .kube/config wait --for=delete pod -l app=mongodb-rs-svc -n mongodb-rs --timeout=180s
-
-# Wait additional time for Ops Manager to register the removal
-echo "Waiting 30s for Ops Manager to register agent removal..."
-sleep 30
-```
-
-### Step 2: Remove all MongoDB resources
-
-```bash
-kubectl --kubeconfig .kube/config delete -f k8s/
-```
-
-### Step 3: Delete the kind cluster
-
-```bash
+# Delete kind cluster
 kind delete cluster --name mongodb-k8s
+
+# Clean local files
+rm -rf .kube/ certs/
 ```
 
-### Step 4: Clean up Ops Manager project (optional)
-
-If the project shows stale servers in Ops Manager, delete it via the UI or API.
-
-### Verify Cleanup
-
-After running cleanup, verify everything was removed:
-
-```bash
-# Verify kind cluster is deleted
-kind get clusters
-# Should not show "mongodb-k8s"
-
-# Verify Docker containers are removed
-docker ps -a | grep mongodb-k8s
-# Should return empty
-
-# Verify generated files (optional - remove if you want a fresh start)
-ls -la .kube/
-ls -la k8s/generated/
-ls -la certs/
-
-# Clean generated files for fresh start
-rm -rf .kube/ k8s/generated/ certs/
-```
+---
 
 ## References
 
 - [MongoDB Enterprise Kubernetes Operator Documentation](https://www.mongodb.com/docs/kubernetes-operator/stable/)
 - [External Connectivity Guide](https://www.mongodb.com/docs/kubernetes-operator/v1.33/tutorial/connect-from-outside-k8s/)
 - [kind Documentation](https://kind.sigs.k8s.io/)
-- [MongoDB Ops Manager Documentation](https://www.mongodb.com/docs/ops-manager/current/)

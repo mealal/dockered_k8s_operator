@@ -261,13 +261,13 @@ class MultiClusterConfig:
 
     Namespace values are hardcoded to match the YAML templates:
     - operator_namespace: 'mongodb' (k8s-multi/namespace.yaml)
-    - rs_namespace: 'mongodb-rs' (k8s-multi/mongodb-rs-namespace.yaml)
+    - rs_namespace: 'eksrsoppoc1d' (k8s-multi/mongodb-rs-namespace.yaml)
     """
     central_cluster_name: str = CENTRAL_CLUSTER_NAME
     member_cluster_name: str = MEMBER_CLUSTER_NAME
     # Hardcoded values matching templates - do not change without updating templates
     operator_namespace: str = "mongodb"      # Matches k8s-multi/namespace.yaml
-    rs_namespace: str = "mongodb-rs"         # Matches k8s-multi/mongodb-rs-namespace.yaml
+    rs_namespace: str = "eksrsoppoc1d"       # Matches k8s-multi/mongodb-rs-namespace.yaml
     # User-configurable values
     ops_manager_url: str = "https://host.docker.internal:8443"
     kubeconfig_dir: str = "./.kube-multi"
@@ -1614,7 +1614,7 @@ class CrossClusterNetworkManager:
           to the Kubernetes headless service DNS. This is dynamic - K8s automatically
           updates DNS when pods restart and get new IPs.
           Example: mongodb-multi-rs-0-0.central.mongodb.local
-                   -> mongodb-multi-rs-0-0.mongodb-multi-rs-0-svc.mongodb-rs.svc.cluster.local
+                   -> mongodb-multi-rs-0-0.mongodb-multi-rs-0-svc.eksrsoppoc1d.svc.cluster.local
 
         - REMOTE pods: Use static virtual IPs in CoreDNS hosts block. These IPs are
           routed via iptables to NodePorts on the remote cluster.
@@ -1632,7 +1632,7 @@ class CrossClusterNetworkManager:
         # - Static entries for REMOTE (member) pods via virtual IPs
         central_rewrite_rules = []
         for i in range(self.config.central_members):
-            # Rewrite: pod.central.mongodb.local -> pod.mongodb-multi-rs-0-svc.mongodb-rs.svc.cluster.local
+            # Rewrite: pod.central.mongodb.local -> pod.mongodb-multi-rs-0-svc.eksrsoppoc1d.svc.cluster.local
             central_rewrite_rules.append(
                 f"        rewrite name {rs_name}-0-{i}.{self.config.central_external_domain} "
                 f"{rs_name}-0-{i}.{rs_name}-0-svc.{self.config.rs_namespace}.svc.cluster.local"
@@ -1648,7 +1648,7 @@ class CrossClusterNetworkManager:
         # - Static entries for REMOTE (central) pods via virtual IPs
         member_rewrite_rules = []
         for i in range(self.config.member_members):
-            # Rewrite: pod.member1.mongodb.local -> pod.mongodb-multi-rs-1-svc.mongodb-rs.svc.cluster.local
+            # Rewrite: pod.member1.mongodb.local -> pod.mongodb-multi-rs-1-svc.eksrsoppoc1d.svc.cluster.local
             member_rewrite_rules.append(
                 f"        rewrite name {rs_name}-1-{i}.{self.config.member_external_domain} "
                 f"{rs_name}-1-{i}.{rs_name}-1-svc.{self.config.rs_namespace}.svc.cluster.local"

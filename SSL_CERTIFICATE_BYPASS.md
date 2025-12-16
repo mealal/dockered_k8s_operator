@@ -50,7 +50,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: ops-manager-connection
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 data:
   # Ops Manager URL - can use IP address even if cert has hostnames
   baseUrl: "https://192.168.65.254:8443"
@@ -76,7 +76,7 @@ apiVersion: mongodb.com/v1
 kind: MongoDB
 metadata:
   name: mongodb-rs
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
 spec:
   members: 3
   version: "7.0.25-ent"
@@ -203,7 +203,7 @@ After deployment, verify the settings are applied:
 
 ### Check ConfigMap
 ```bash
-kubectl get configmap ops-manager-connection -n mongodb-rs -o yaml
+kubectl get configmap ops-manager-connection -n eksrsoppoc1d -o yaml
 ```
 
 Expected output should include:
@@ -214,7 +214,7 @@ data:
 
 ### Check Pod Environment Variables
 ```bash
-kubectl get pod mongodb-rs-0 -n mongodb-rs -o yaml | grep -A2 "SSL_REQUIRE"
+kubectl get pod mongodb-rs-0 -n eksrsoppoc1d -o yaml | grep -A2 "SSL_REQUIRE"
 ```
 
 Expected output:
@@ -225,7 +225,7 @@ Expected output:
 
 ### Check Agent Flags
 ```bash
-kubectl get pod mongodb-rs-0 -n mongodb-rs -o yaml | grep "AGENT_FLAGS" -A1
+kubectl get pod mongodb-rs-0 -n eksrsoppoc1d -o yaml | grep "AGENT_FLAGS" -A1
 ```
 
 Expected output should include:

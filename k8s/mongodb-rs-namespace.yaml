@@ -19,7 +19,7 @@ apiVersion: v1
 kind: Namespace
 metadata:
   # Name of the namespace for MongoDB replica sets
-  name: mongodb-rs
+  name: eksrsoppoc1d
   labels:
     # Labels for identification and filtering
     app.kubernetes.io/name: mongodb-replicaset

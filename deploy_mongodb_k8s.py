@@ -216,12 +216,12 @@ class ClusterConfig:
 
     Namespace values are hardcoded to match the YAML templates:
     - operator_namespace: 'mongodb' (k8s/namespace.yaml)
-    - rs_namespace: 'mongodb-rs' (k8s/mongodb-rs-namespace.yaml)
+    - rs_namespace: 'eksrsoppoc1d' (k8s/mongodb-rs-namespace.yaml)
     """
     name: str = "mongodb-k8s"
     # Hardcoded values matching templates - do not change without updating templates
     operator_namespace: str = "mongodb"      # Matches k8s/namespace.yaml
-    rs_namespace: str = "mongodb-rs"         # Matches k8s/mongodb-rs-namespace.yaml
+    rs_namespace: str = "eksrsoppoc1d"       # Matches k8s/mongodb-rs-namespace.yaml
     # User-configurable values
     worker_nodes: int = 1
     ops_manager_url: str = "https://host.docker.internal:8443"
@@ -694,8 +694,8 @@ class MongoDBReplicaSetDeployer:
         """Generate TLS certificates for MongoDB pods.
 
         Creates certificates with SANs for the MongoDB pod hostnames:
-        - mongodb-rs-0.mongodb-rs-svc.mongodb-rs.svc.cluster.local
-        - mongodb-rs-1.mongodb-rs-svc.mongodb-rs.svc.cluster.local
+        - mongodb-rs-0.mongodb-rs-svc.eksrsoppoc1d.svc.cluster.local
+        - mongodb-rs-1.mongodb-rs-svc.eksrsoppoc1d.svc.cluster.local
         - etc.
 
         External access is always enabled with localhost, also includes:

@@ -23,15 +23,15 @@
 # Apply with: kubectl apply -f mongodb-replicaset.yaml
 #
 # Monitor deployment:
-#   kubectl get mongodb -n mongodb-rs -w
-#   kubectl describe mongodb mongodb-rs -n mongodb-rs
+#   kubectl get mongodb -n eksrsoppoc1d -w
+#   kubectl describe mongodb mongodb-rs -n eksrsoppoc1d
 # =============================================================================
 
 apiVersion: mongodb.com/v1
 kind: MongoDB
 metadata:
   name: mongodb-rs
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
   labels:
     app.kubernetes.io/name: mongodb
     app.kubernetes.io/component: database
@@ -73,7 +73,6 @@ spec:
     externalService:
       spec:
         type: NodePort
-        port: 27017
 
   # Split-horizon DNS configuration for replica set members
   # Maps internal pod hostnames to external localhost:NodePort addresses

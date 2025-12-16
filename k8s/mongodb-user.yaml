@@ -17,7 +17,7 @@ apiVersion: mongodb.com/v1
 kind: MongoDBUser
 metadata:
   name: mongodb-admin-user
-  namespace: mongodb-rs
+  namespace: eksrsoppoc1d
   labels:
     app.kubernetes.io/name: mongodb-user
     app.kubernetes.io/component: user
