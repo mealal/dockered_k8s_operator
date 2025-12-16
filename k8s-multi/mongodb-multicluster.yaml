@@ -47,6 +47,11 @@ spec:
 
   credentials: ops-manager-admin-key
 
+  # Custom MongoDB port configuration
+  additionalMongodConfig:
+    net:
+      port: 10901
+
   clusterSpecList:
     - clusterName: {{CENTRAL_CLUSTER_NAME}}
       members: {{CENTRAL_MEMBERS}}
@@ -55,6 +60,9 @@ spec:
         externalService:
           spec:
             type: NodePort
+            ports:
+              - port: 10901
+                targetPort: 10901
 
     - clusterName: {{MEMBER_CLUSTER_NAME}}
       members: {{MEMBER_MEMBERS}}
@@ -63,6 +71,9 @@ spec:
         externalService:
           spec:
             type: NodePort
+            ports:
+              - port: 10901
+                targetPort: 10901
 
   # Split-horizon DNS configuration for external client access
   # Maps internal pod hostnames to external localhost:NodePort addresses

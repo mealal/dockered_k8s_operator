@@ -518,18 +518,19 @@ echo "Central IP: $CENTRAL_IP, Member IP: $MEMBER_IP"
 
 # On CENTRAL cluster: Route member virtual IPs to member cluster's NodePorts
 # PREROUTING for pod traffic, OUTPUT for node traffic
-docker exec $CENTRAL_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.100 -p tcp --dport 27017 -j DNAT --to-destination $MEMBER_IP:30200
-docker exec $CENTRAL_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.101 -p tcp --dport 27017 -j DNAT --to-destination $MEMBER_IP:30201
-docker exec $CENTRAL_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.100 -p tcp --dport 27017 -j DNAT --to-destination $MEMBER_IP:30200
-docker exec $CENTRAL_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.101 -p tcp --dport 27017 -j DNAT --to-destination $MEMBER_IP:30201
+# Note: MongoDB listens on port 10901 (configured via additionalMongodConfig)
+docker exec $CENTRAL_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.100 -p tcp --dport 10901 -j DNAT --to-destination $MEMBER_IP:30200
+docker exec $CENTRAL_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.101 -p tcp --dport 10901 -j DNAT --to-destination $MEMBER_IP:30201
+docker exec $CENTRAL_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.100 -p tcp --dport 10901 -j DNAT --to-destination $MEMBER_IP:30200
+docker exec $CENTRAL_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.101 -p tcp --dport 10901 -j DNAT --to-destination $MEMBER_IP:30201
 
 # On MEMBER cluster: Route central virtual IPs to central cluster's NodePorts
-docker exec $MEMBER_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.200 -p tcp --dport 27017 -j DNAT --to-destination $CENTRAL_IP:30100
-docker exec $MEMBER_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.201 -p tcp --dport 27017 -j DNAT --to-destination $CENTRAL_IP:30101
-docker exec $MEMBER_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.202 -p tcp --dport 27017 -j DNAT --to-destination $CENTRAL_IP:30102
-docker exec $MEMBER_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.200 -p tcp --dport 27017 -j DNAT --to-destination $CENTRAL_IP:30100
-docker exec $MEMBER_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.201 -p tcp --dport 27017 -j DNAT --to-destination $CENTRAL_IP:30101
-docker exec $MEMBER_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.202 -p tcp --dport 27017 -j DNAT --to-destination $CENTRAL_IP:30102
+docker exec $MEMBER_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.200 -p tcp --dport 10901 -j DNAT --to-destination $CENTRAL_IP:30100
+docker exec $MEMBER_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.201 -p tcp --dport 10901 -j DNAT --to-destination $CENTRAL_IP:30101
+docker exec $MEMBER_CONTAINER iptables -t nat -A PREROUTING -d 172.19.0.202 -p tcp --dport 10901 -j DNAT --to-destination $CENTRAL_IP:30102
+docker exec $MEMBER_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.200 -p tcp --dport 10901 -j DNAT --to-destination $CENTRAL_IP:30100
+docker exec $MEMBER_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.201 -p tcp --dport 10901 -j DNAT --to-destination $CENTRAL_IP:30101
+docker exec $MEMBER_CONTAINER iptables -t nat -A OUTPUT -d 172.19.0.202 -p tcp --dport 10901 -j DNAT --to-destination $CENTRAL_IP:30102
 
 # Add MASQUERADE rule for return traffic (required for cross-cluster communication)
 docker exec $CENTRAL_CONTAINER iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || \
@@ -645,8 +646,8 @@ spec:
   type: NodePort
   ports:
   - name: mongodb
-    port: 27017
-    targetPort: 27017
+    port: 10901
+    targetPort: 10901
     nodePort: 30100
   selector:
     controller: mongodb-enterprise-operator
@@ -664,8 +665,8 @@ spec:
   type: NodePort
   ports:
   - name: mongodb
-    port: 27017
-    targetPort: 27017
+    port: 10901
+    targetPort: 10901
     nodePort: 30101
   selector:
     controller: mongodb-enterprise-operator
@@ -683,8 +684,8 @@ spec:
   type: NodePort
   ports:
   - name: mongodb
-    port: 27017
-    targetPort: 27017
+    port: 10901
+    targetPort: 10901
     nodePort: 30102
   selector:
     controller: mongodb-enterprise-operator
@@ -705,8 +706,8 @@ spec:
   type: NodePort
   ports:
   - name: mongodb
-    port: 27017
-    targetPort: 27017
+    port: 10901
+    targetPort: 10901
     nodePort: 30200
   selector:
     controller: mongodb-enterprise-operator
@@ -724,8 +725,8 @@ spec:
   type: NodePort
   ports:
   - name: mongodb
-    port: 27017
-    targetPort: 27017
+    port: 10901
+    targetPort: 10901
     nodePort: 30201
   selector:
     controller: mongodb-enterprise-operator
@@ -748,6 +749,11 @@ spec:
   version: "7.0.25-ent"
   type: ReplicaSet
 
+  # Configure MongoDB to listen on port 10901
+  additionalMongodConfig:
+    net:
+      port: 10901
+
   opsManager:
     configMapRef:
       name: ops-manager-connection
@@ -762,7 +768,9 @@ spec:
         externalService:
           spec:
             type: NodePort
-            port: 27017
+            ports:
+              - port: 10901
+                targetPort: 10901
 
     - clusterName: kind-mongodb-member-1
       members: 2
@@ -771,7 +779,9 @@ spec:
         externalService:
           spec:
             type: NodePort
-            port: 27017
+            ports:
+              - port: 10901
+                targetPort: 10901
 
   connectivity:
     replicaSetHorizons:
@@ -1007,7 +1017,7 @@ docker exec mongodb-central-control-plane iptables -t nat -L OUTPUT -n | grep 17
 3. **Test cross-cluster connectivity from a pod**:
 ```bash
 kubectl exec mongodb-multi-rs-0-0 -n eksrsoppoc1d -c mongodb-enterprise-database -- \
-  bash -c "timeout 5 bash -c '</dev/tcp/172.19.0.100/27017' && echo OK || echo FAILED"
+  bash -c "timeout 5 bash -c '</dev/tcp/172.19.0.100/10901' && echo OK || echo FAILED"
 ```
 
 ### Authentication failed - Certificate hash mismatch

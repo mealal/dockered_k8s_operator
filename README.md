@@ -545,7 +545,7 @@ python -m pytest tests/ --cov=shared --cov-report=term-missing
 ### Deployment Constraints
 
 - **Single Ops Manager**: Scripts assume one Ops Manager instance at `localhost:8443`.
-- **Port conflicts**: Default ports (30000-30002, 30100-30102, 30200-30201) must be available.
+- **Port conflicts**: Default ports (30000-30002, 30100-30102, 30200-30201) must be available. MongoDB listens on port 10901 internally.
 - **No IPv6**: Scripts assume IPv4 networking only.
 
 ## Exit Codes
@@ -658,7 +658,7 @@ kubectl --kubeconfig .kube/config get svc -n eksrsoppoc1d | grep external
 If you can't connect via external ports, use port-forwarding as a fallback:
 
 ```bash
-kubectl --kubeconfig .kube/config port-forward -n eksrsoppoc1d mongodb-rs-0 27017:27017
+kubectl --kubeconfig .kube/config port-forward -n eksrsoppoc1d mongodb-rs-0 10901:10901
 ```
 
 ## Documentation

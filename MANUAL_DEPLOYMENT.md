@@ -463,8 +463,8 @@ spec:
   type: NodePort
   ports:
   - name: mongodb
-    port: 27017
-    targetPort: 27017
+    port: 10901
+    targetPort: 10901
     nodePort: 30000
   selector:
     controller: mongodb-enterprise-operator
@@ -482,8 +482,8 @@ spec:
   type: NodePort
   ports:
   - name: mongodb
-    port: 27017
-    targetPort: 27017
+    port: 10901
+    targetPort: 10901
     nodePort: 30001
   selector:
     controller: mongodb-enterprise-operator
@@ -501,8 +501,8 @@ spec:
   type: NodePort
   ports:
   - name: mongodb
-    port: 27017
-    targetPort: 27017
+    port: 10901
+    targetPort: 10901
     nodePort: 30002
   selector:
     controller: mongodb-enterprise-operator
@@ -532,6 +532,11 @@ spec:
   version: "7.0.25-ent"
   type: ReplicaSet
 
+  # Configure MongoDB to listen on port 10901
+  additionalMongodConfig:
+    net:
+      port: 10901
+
   opsManager:
     configMapRef:
       name: ops-manager-connection
@@ -546,6 +551,9 @@ spec:
     externalService:
       spec:
         type: NodePort
+        ports:
+          - port: 10901
+            targetPort: 10901
 
   connectivity:
     replicaSetHorizons:

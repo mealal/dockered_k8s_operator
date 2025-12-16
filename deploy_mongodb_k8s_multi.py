@@ -686,7 +686,8 @@ class MultiClusterKubernetesManager(BaseKubernetesManager):
                     # Only process external services
                     if "external" in name:
                         for port_spec in item.get("spec", {}).get("ports", []):
-                            if port_spec.get("port") == 27017:
+                            # Use port 10901 for MongoDB (custom port configured in additionalMongodConfig)
+                            if port_spec.get("port") == 10901:
                                 node_port = port_spec.get("nodePort")
                                 if node_port:
                                     nodeports.append(node_port)
@@ -717,6 +718,7 @@ class MultiClusterKubernetesManager(BaseKubernetesManager):
 
         def create_service_yaml(svc_name: str, pod_name: str, nodeport: int) -> str:
             """Generate YAML for a NodePort service."""
+            # Use port 10901 for MongoDB (custom port configured in additionalMongodConfig)
             return f"""apiVersion: v1
 kind: Service
 metadata:
@@ -729,8 +731,8 @@ spec:
   type: NodePort
   ports:
   - name: mongodb
-    port: 27017
-    targetPort: 27017
+    port: 10901
+    targetPort: 10901
     nodePort: {nodeport}
   selector:
     controller: mongodb-enterprise-operator
@@ -1529,36 +1531,37 @@ class CrossClusterNetworkManager:
 
             # Try to find NodePort, use a default range if not found
             nodeport = nodeports.get(pod_id, str(30000 + i))
-            logger.info(f"Routing {virtual_ip}:27017 -> {target_ip}:{nodeport} (pod: {pod_id})")
+            # Use port 10901 for MongoDB (custom port configured in additionalMongodConfig)
+            logger.info(f"Routing {virtual_ip}:10901 -> {target_ip}:{nodeport} (pod: {pod_id})")
 
             # First delete any existing rules for this virtual IP (idempotent)
             script_lines.append(
-                f"iptables -t nat -D PREROUTING -d {virtual_ip} -p tcp --dport 27017 "
+                f"iptables -t nat -D PREROUTING -d {virtual_ip} -p tcp --dport 10901 "
                 f"-j DNAT --to-destination {target_ip}:{nodeport} 2>/dev/null || true"
             )
             script_lines.append(
-                f"iptables -t nat -D OUTPUT -d {virtual_ip} -p tcp --dport 27017 "
+                f"iptables -t nat -D OUTPUT -d {virtual_ip} -p tcp --dport 10901 "
                 f"-j DNAT --to-destination {target_ip}:{nodeport} 2>/dev/null || true"
             )
 
             # Delete any stale rules with old ports for this virtual IP
             for old_port in range(30000, 30010):
                 script_lines.append(
-                    f"iptables -t nat -D PREROUTING -d {virtual_ip} -p tcp --dport 27017 "
+                    f"iptables -t nat -D PREROUTING -d {virtual_ip} -p tcp --dport 10901 "
                     f"-j DNAT --to-destination {target_ip}:{old_port} 2>/dev/null || true"
                 )
                 script_lines.append(
-                    f"iptables -t nat -D OUTPUT -d {virtual_ip} -p tcp --dport 27017 "
+                    f"iptables -t nat -D OUTPUT -d {virtual_ip} -p tcp --dport 10901 "
                     f"-j DNAT --to-destination {target_ip}:{old_port} 2>/dev/null || true"
                 )
 
             # Add DNAT rules with correct NodePort
             script_lines.append(
-                f"iptables -t nat -A PREROUTING -d {virtual_ip} -p tcp --dport 27017 "
+                f"iptables -t nat -A PREROUTING -d {virtual_ip} -p tcp --dport 10901 "
                 f"-j DNAT --to-destination {target_ip}:{nodeport}"
             )
             script_lines.append(
-                f"iptables -t nat -A OUTPUT -d {virtual_ip} -p tcp --dport 27017 "
+                f"iptables -t nat -A OUTPUT -d {virtual_ip} -p tcp --dport 10901 "
                 f"-j DNAT --to-destination {target_ip}:{nodeport}"
             )
 

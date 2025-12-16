@@ -951,6 +951,7 @@ class MongoDBReplicaSetDeployer:
             pod_name = f"{rs_name}-{i}"
 
             # Generate service YAML
+            # Use port 10901 for MongoDB (custom port configured in additionalMongodConfig)
             svc_yaml = f"""apiVersion: v1
 kind: Service
 metadata:
@@ -963,8 +964,8 @@ spec:
   type: NodePort
   ports:
   - name: mongodb
-    port: 27017
-    targetPort: 27017
+    port: 10901
+    targetPort: 10901
     nodePort: {target_port}
   selector:
     controller: mongodb-enterprise-operator

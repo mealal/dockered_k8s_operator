@@ -24,8 +24,8 @@ spec:
   type: NodePort
   ports:
   - name: mongodb
-    port: 27017
-    targetPort: 27017
+    port: 10901
+    targetPort: 10901
     nodePort: 30000
   selector:
     controller: mongodb-enterprise-operator
@@ -44,8 +44,8 @@ spec:
   type: NodePort
   ports:
   - name: mongodb
-    port: 27017
-    targetPort: 27017
+    port: 10901
+    targetPort: 10901
     nodePort: 30001
   selector:
     controller: mongodb-enterprise-operator
@@ -64,8 +64,8 @@ spec:
   type: NodePort
   ports:
   - name: mongodb
-    port: 27017
-    targetPort: 27017
+    port: 10901
+    targetPort: 10901
     nodePort: 30002
   selector:
     controller: mongodb-enterprise-operator
