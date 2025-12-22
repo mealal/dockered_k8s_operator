@@ -16,6 +16,12 @@ certs/
 # Kubernetes kubeconfig and kind binary (multi-cluster)
 .kube-multi/
 
+# EKS kubeconfig and tokens
+.kube-eks/
+
+# AWS tools (eksctl, etc.)
+.aws-tools/
+
 # Generated Kubernetes manifests (contain populated secrets)
 k8s/generated/
 k8s-multi/generated/
