@@ -9,6 +9,7 @@ This project provides automated deployment scripts for:
 1. **MongoDB Ops Manager** - Running in Docker with HTTPS enabled
 2. **MongoDB Enterprise Kubernetes Operator** - Deployed to a kind (Kubernetes IN Docker) cluster
 3. **MongoDB Replica Set** - Managed by the operator and registered in Ops Manager
+4. **MongoDB Community Search** - Community 8.2 with standalone mongot for `$search` / `$vectorSearch` (Docker, Ops Manager-managed)
 
 ## Features
 
@@ -69,8 +70,10 @@ This project has been tested with the following versions:
 
 | Component | Tested Version | Notes |
 |-----------|----------------|-------|
-| MongoDB Ops Manager | 7.0.x, 8.0.x | Docker image with HTTPS |
-| MongoDB Enterprise Server | 7.0.25-ent | Configured in templates |
+| MongoDB Ops Manager | 8.0.20 | Docker image with HTTPS (upgraded from 7.0.x) |
+| MongoDB Enterprise Server | 7.0.25-ent | Configured in K8s templates |
+| MongoDB Community Server | 8.2.5 | For Community Search deployment |
+| mongot (Community Search) | 0.60.1 | Standalone search engine for `$search` / `$vectorSearch` |
 | MongoDB Enterprise K8s Operator | 1.33.x | Latest stable |
 | Kubernetes (kind) | 1.28.x | Kind v0.20+ recommended |
 | Python | 3.8+ | 3.10+ recommended |
@@ -130,8 +133,11 @@ pip install -r requirements.txt -r requirements-dev.txt
 | Deploy Ops Manager | `python deploy_ops_manager.py` |
 | Deploy single-cluster MongoDB | `python deploy_mongodb_k8s.py` |
 | Deploy multi-cluster MongoDB | `python deploy_mongodb_k8s_multi.py` |
+| Deploy Community RS (Docker) | `python deploy_mongodb_community.py` |
+| Deploy mongot (Search) | `python deploy_mongot.py` |
 | Cleanup single-cluster | `python deploy_mongodb_k8s.py --cleanup` |
 | Cleanup multi-cluster | `python deploy_mongodb_k8s_multi.py --cleanup` |
+| Cleanup Community Search | `python deploy_mongot.py --cleanup && python deploy_mongodb_community.py --cleanup` |
 | Skip SSL verification (testing) | `--ssl-skip-verify --skip-preflight` |
 | Don't wait for Running state | `--no-wait` |
 | Show passwords in output | `--show-password` |
@@ -147,17 +153,27 @@ pip install -r requirements.txt -r requirements-dev.txt
 │   Step 1: Ops Manager              Step 2: Choose Deployment Mode           │
 │   ┌─────────────────────┐                                                   │
 │   │ deploy_ops_manager  │          ┌─────────────────────────────────────┐  │
-│   │ .py                 │          │     Single-Cluster     Multi-Cluster│  │
-│   │                     │          │     ┌───────────┐     ┌───────────┐ │  │
-│   │ • Generate certs    │    OR    │     │ 1 kind    │     │ 2 kind    │ │  │
-│   │ • Start containers  │─────────>│     │ cluster   │     │ clusters  │ │  │
-│   │ • Create API keys   │          │     │ 3 MongoDB │     │ 5 MongoDB │ │  │
-│   │ • Save credentials  │          │     │ nodes     │     │ nodes     │ │  │
-│   └─────────────────────┘          │     └───────────┘     └───────────┘ │  │
-│            │                       │           │                 │       │  │
-│            v                       │           v                 v       │  │
-│   ops-manager-api-key.json         │  deploy_mongodb   deploy_mongodb   │  │
-│                                    │  _k8s.py          _k8s_multi.py    │  │
+│   │ .py                 │          │  Single-Cluster    Multi-Cluster    │  │
+│   │                     │          │  ┌───────────┐    ┌───────────┐    │  │
+│   │ • Generate certs    │          │  │ 1 kind    │    │ 2 kind    │    │  │
+│   │ • Start containers  │────+────>│  │ cluster   │    │ clusters  │    │  │
+│   │ • Create API keys   │    │     │  │ 3 MongoDB │    │ 5 MongoDB │    │  │
+│   │ • Save credentials  │    │     │  │ nodes     │    │ nodes     │    │  │
+│   └─────────────────────┘    │     │  └───────────┘    └───────────┘    │  │
+│            │                 │     │        │                │          │  │
+│            v                 │     │        v                v          │  │
+│   ops-manager-api-key.json   │     │ deploy_mongodb   deploy_mongodb   │  │
+│                              │     │ _k8s.py          _k8s_multi.py    │  │
+│                              │     └─────────────────────────────────────┘  │
+│                              │                                              │
+│                              │     ┌─────────────────────────────────────┐  │
+│                              │     │  Community Search (Docker)          │  │
+│                              │     │  ┌─────────────────────────────┐    │  │
+│                              └────>│  │ deploy_mongodb_community.py │    │  │
+│                                    │  │ deploy_mongot.py            │    │  │
+│                                    │  │ 3 mongod + 3 mongot nodes  │    │  │
+│                                    │  │ $search / $vectorSearch     │    │  │
+│                                    │  └─────────────────────────────┘    │  │
 │                                    └─────────────────────────────────────┘  │
 │                                                                              │
 │   Step 3: Connect to MongoDB                                                 │
@@ -214,9 +230,22 @@ This will:
 - Wait for MongoDB to reach Running state (use `--no-wait` to skip)
 - Run connectivity health check
 
-### 4. Connect to MongoDB
+### 4. (Alternative) Deploy Community Search in Docker
 
-#### Single-Cluster Mode
+For a 3-node Community MongoDB 8.2.5 replica set with `$search`, `$searchMeta`, and `$vectorSearch`:
+
+```bash
+python deploy_ops_manager.py
+python deploy_mongodb_community.py
+python deploy_mongot.py
+```
+
+This deploys an Ops Manager-managed replica set with standalone mongot containers.
+See [SEARCH_DEPLOYMENT_GUIDE.md](SEARCH_DEPLOYMENT_GUIDE.md) for full details.
+
+### 5. Connect to MongoDB
+
+#### K8s Single-Cluster Mode
 
 After deployment, connect using SCRAM authentication:
 
@@ -233,7 +262,7 @@ mongosh "mongodb://localhost:30000,localhost:30001,localhost:30002/?replicaSet=m
   --tlsCertificateKeyFile ./certs/mongodb/client.pem
 ```
 
-#### Multi-Cluster Mode
+#### K8s Multi-Cluster Mode
 
 Connect to the 5-node replica set (3 on central cluster + 2 on member cluster):
 
@@ -252,7 +281,7 @@ mongosh "mongodb://localhost:30100,localhost:30101,localhost:30102,localhost:302
 
 > **Note**: Multi-cluster ports are 30100-30102 for central cluster and 30200-30201 for member cluster.
 
-### 5. Access Ops Manager
+### 6. Access Ops Manager
 
 Open https://localhost:8443 in your browser (accept the self-signed certificate).
 
@@ -265,8 +294,16 @@ koperator_poc/
 ├── deploy_ops_manager.py           # Ops Manager deployment script
 ├── deploy_mongodb_k8s.py           # Single-cluster K8s deployment script
 ├── deploy_mongodb_k8s_multi.py     # Multi-cluster K8s deployment script
+├── deploy_mongodb_community.py     # Community 8.2 RS deployment (Docker, OM-managed)
+├── deploy_mongot.py                # mongot (Community Search) deployment
 ├── docker-compose.ops-manager.yml  # Docker Compose for Ops Manager
 ├── docker-build/                   # Custom Ops Manager Docker image
+│   ├── Dockerfile
+│   └── entrypoint.sh
+├── docker-build-agent/             # MongoDB Automation Agent image
+│   ├── Dockerfile
+│   └── entrypoint.sh
+├── docker-build-mongot/            # mongot (Community Search) image
 │   ├── Dockerfile
 │   └── entrypoint.sh
 ├── shared/                         # Shared Python utilities module
@@ -314,6 +351,9 @@ koperator_poc/
 ├── .kube/                          # Single-cluster kubeconfig (generated)
 ├── .kube-multi/                    # Multi-cluster kubeconfigs (generated)
 ├── certs/                          # TLS certificates (generated)
+├── data-community/                 # Community Search data (generated)
+│   ├── connection-info.json        # RS connection info for mongot script
+│   └── mongot-pwfile               # mongot SCRAM password file
 ├── k8s/generated/                  # Processed YAML files (generated)
 ├── k8s-multi/generated/            # Processed YAML files (generated)
 └── ops-manager-api-key.json        # API credentials (generated)
@@ -513,6 +553,32 @@ docker ps -a | grep mongodb-         # Should return empty (for kind containers)
 | `--cleanup` | Delete both kind clusters |
 | `-v, --verbose` | Verbose output |
 
+### deploy_mongodb_community.py
+
+```bash
+# Deploy 3-node RS managed by Ops Manager
+python deploy_mongodb_community.py
+
+# Custom RS name and MongoDB version
+python deploy_mongodb_community.py --rs-name myrs --mongodb-version 8.2.5
+
+# Cleanup everything
+python deploy_mongodb_community.py --cleanup
+```
+
+### deploy_mongot.py
+
+```bash
+# Deploy mongot alongside the RS
+python deploy_mongot.py
+
+# Build image only
+python deploy_mongot.py --build-only
+
+# Cleanup mongot containers
+python deploy_mongot.py --cleanup
+```
+
 ## Running Tests
 
 The project includes unit tests for critical components:
@@ -663,9 +729,14 @@ kubectl --kubeconfig .kube/config port-forward -n eksrsoppoc1d mongodb-rs-0 1090
 
 ## Documentation
 
+### Project Guides
+- [Search Deployment Guide](SEARCH_DEPLOYMENT_GUIDE.md) - Deploy Community Search with mongot (Docker, Ops Manager-managed)
+- [Search Options Review](LOCAL_SEARCH_OPTIONS.md) - Comprehensive review of all MongoDB Search deployment options
 - [Manual Deployment Guide](MANUAL_DEPLOYMENT.md) - Step-by-step single-cluster manual deployment
 - [Multi-Cluster Deployment Guide](MANUAL_DEPLOYMENT_MULTI.md) - Multi-cluster manual deployment with CoreDNS
 - [SSL Certificate Bypass](SSL_CERTIFICATE_BYPASS.md) - Documentation on SSL certificate bypass for testing
+
+### External References
 - [MongoDB Enterprise Kubernetes Operator Docs](https://www.mongodb.com/docs/kubernetes-operator/stable/)
 - [MongoDB Ops Manager Docs](https://www.mongodb.com/docs/ops-manager/current/)
 - [External Connectivity Guide](https://www.mongodb.com/docs/kubernetes-operator/v1.33/tutorial/connect-from-outside-k8s/)

@@ -110,8 +110,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # MongoDB Ops Manager version and download URL
-OPS_MANAGER_VERSION = "7.0.20"
-OPS_MANAGER_RPM_URL = "https://downloads.mongodb.com/on-prem-mms/rpm/mongodb-mms-7.0.20.500.20251204T1317Z.x86_64.rpm"
+OPS_MANAGER_VERSION = "8.0.20"
+OPS_MANAGER_RPM_URL = "https://downloads.mongodb.com/on-prem-mms/rpm/mongodb-mms-8.0.20.500.20260218T0837Z.x86_64.rpm"
 
 
 # =============================================================================

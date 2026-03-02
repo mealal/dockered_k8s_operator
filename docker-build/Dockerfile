@@ -2,17 +2,17 @@
 FROM rockylinux:8
 
 LABEL maintainer="ops-manager-deployer"
-LABEL version="7.0.20"
+LABEL version="8.0.20"
 
-# Install dependencies
+# Install dependencies (Ops Manager 8.0 bundles its own JDK, no system Java needed)
 RUN dnf install -y --allowerasing \
     curl procps net-tools cyrus-sasl cyrus-sasl-gssapi \
     cyrus-sasl-plain krb5-libs libcurl openldap openssl \
-    ncurses java-11-openjdk-headless \
+    ncurses \
     && dnf clean all
 
 # Download and install MongoDB Ops Manager
-RUN curl -fSL "https://downloads.mongodb.com/on-prem-mms/rpm/mongodb-mms-7.0.20.500.20251204T1317Z.x86_64.rpm" -o /tmp/mongodb-mms.rpm \
+RUN curl -fSL "https://downloads.mongodb.com/on-prem-mms/rpm/mongodb-mms-8.0.20.500.20260218T0837Z.x86_64.rpm" -o /tmp/mongodb-mms.rpm \
     && rpm -ivh /tmp/mongodb-mms.rpm \
     && rm -f /tmp/mongodb-mms.rpm
 

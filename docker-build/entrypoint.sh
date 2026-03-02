@@ -59,7 +59,7 @@ if [ -f "${CERT_DIR}/server.pem" ] && [ -f "${CERT_DIR}/ca.crt" ]; then
     echo "Configuring HTTPS..."
     update_config "mms.https.PEMKeyFile" "${CERT_DIR}/server.pem"
     update_config "mms.https.CAFile" "${CERT_DIR}/ca.crt"
-    update_config "mms.https.ClientCertificateMode" "None"
+    # Note: mms.https.ClientCertificateMode was removed in Ops Manager 8.0
     if [ -n "$MMS_HTTPS_PORT" ]; then
         update_config "BASE_PORT" "${MMS_HTTPS_PORT}"
     fi
