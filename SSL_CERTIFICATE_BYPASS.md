@@ -1,6 +1,6 @@
 # SSL Certificate Verification Bypass for Testing
 
-This document describes how to bypass SSL certificate verification when deploying MongoDB with the Enterprise Kubernetes Operator. This is useful for testing environments where certificates may have hostname/IP mismatches.
+This document describes how to bypass SSL certificate verification when deploying MongoDB with MCK (MongoDB Controllers for Kubernetes). This is useful for testing environments where certificates may have hostname/IP mismatches.
 
 > **WARNING**: Disabling SSL certificate verification is **INSECURE** and should **NEVER** be used in production. It makes connections susceptible to man-in-the-middle attacks.
 
@@ -19,7 +19,7 @@ When connecting to Ops Manager from inside a kind cluster, the IP address depend
 
 ## Problem Description
 
-When deploying MongoDB to Kubernetes with the Enterprise Operator connecting to Ops Manager over HTTPS, you may encounter certificate validation errors such as:
+When deploying MongoDB to Kubernetes with the MCK operator connecting to Ops Manager over HTTPS, you may encounter certificate validation errors such as:
 
 ```
 x509: cannot validate certificate for 192.168.65.254 because it doesn't contain any IP SANs
@@ -126,7 +126,7 @@ spec:
 
 ### 1. ConfigMap: `sslRequireValidMMSServerCertificates`
 
-This setting is read by the **MongoDB Enterprise Kubernetes Operator** when it connects to Ops Manager to:
+This setting is read by the **MCK (MongoDB Controllers for Kubernetes) operator** when it connects to Ops Manager to:
 - Verify credentials
 - Create/read projects
 - Push automation configuration
@@ -296,6 +296,6 @@ For production environments, **do not use these bypass settings**. Instead:
 
 ## References
 
-- [MongoDB Enterprise Kubernetes Operator - Create Project Using ConfigMap](https://www.mongodb.com/docs/kubernetes-operator/current/tutorial/create-project-using-configmap/)
+- [MongoDB Controllers for Kubernetes - Create Project Using ConfigMap](https://www.mongodb.com/docs/kubernetes/current/tutorial/create-project-using-configmap/)
 - [MongoDB Agent Settings - tlsRequireValidMMSServerCertificates](https://www.mongodb.com/docs/ops-manager/current/reference/mongodb-agent-settings/)
 - [Configure MongoDB Agent for TLS](https://www.mongodb.com/docs/ops-manager/current/tutorial/configure-mongodb-agent-for-tls/)

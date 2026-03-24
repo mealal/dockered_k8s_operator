@@ -508,7 +508,7 @@ SUGGESTIONS: Dict[str, str] = {
 
     # Deployment issues
     "pods_not_ready": "Check pod events: kubectl describe pod <pod-name> -n <namespace>",
-    "operator_not_ready": "Check operator logs: kubectl logs -n mongodb -l app.kubernetes.io/name=mongodb-enterprise-operator",
+    "operator_not_ready": "Check operator logs: kubectl logs -n mongodb -l app.kubernetes.io/name=mongodb-kubernetes-operator",
     "agents_not_connected": "Check agent logs: kubectl logs <pod-name> -n mongodb-rs -c mongodb-enterprise-database",
     "pvc_pending": "Check storage class: kubectl get storageclass",
 

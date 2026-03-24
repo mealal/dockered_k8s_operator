@@ -1,9 +1,8 @@
 # =============================================================================
-# MongoDB Enterprise Operator RBAC for Replica Set Namespace
+# MCK Operator RBAC for Replica Set Namespace
 # =============================================================================
 #
-# This file defines the Role and RoleBinding that allow the MongoDB Enterprise
-# Kubernetes Operator (running in the operator namespace) to manage resources
+# This file defines the Role and RoleBinding that allow MCK (MongoDB Controllers for Kubernetes) (running in the operator namespace) to manage resources
 # in the replica set namespace.
 #
 # The operator needs these permissions to:
@@ -23,10 +22,10 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: mongodb-enterprise-operator
+  name: mongodb-kubernetes-operator
   namespace: eksrsoppoc1d
   labels:
-    app.kubernetes.io/name: mongodb-enterprise-operator
+    app.kubernetes.io/name: mongodb-kubernetes-operator
     app.kubernetes.io/component: rbac
     app.kubernetes.io/managed-by: deploy-mongodb-k8s
 rules:
@@ -52,17 +51,17 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: mongodb-enterprise-operator
+  name: mongodb-kubernetes-operator
   namespace: eksrsoppoc1d
   labels:
-    app.kubernetes.io/name: mongodb-enterprise-operator
+    app.kubernetes.io/name: mongodb-kubernetes-operator
     app.kubernetes.io/component: rbac
     app.kubernetes.io/managed-by: deploy-mongodb-k8s
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: mongodb-enterprise-operator
+  name: mongodb-kubernetes-operator
 subjects:
   - kind: ServiceAccount
-    name: mongodb-enterprise-operator
+    name: mongodb-kubernetes-operator
     namespace: mongodb

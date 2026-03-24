@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
 """
-MongoDB Enterprise Kubernetes Operator Multi-Cluster Deployment
+MongoDB Kubernetes Operator (MCK) Multi-Cluster Deployment
 
 This script deploys MongoDB across multiple Kubernetes clusters:
 1. Creates 2 kind clusters (central + 1 member)
-2. Deploys MongoDB Enterprise Kubernetes Operator to central cluster
+2. Deploys MCK (MongoDB Controllers for Kubernetes) to central cluster via Helm
 3. Configures cross-cluster connectivity
 4. Deploys a MongoDBMultiCluster resource spanning both clusters
-
-Based on MongoDB documentation:
-https://www.mongodb.com/docs/kubernetes-operator/v1.33/multi-cluster-no-service-mesh-deploy-rs/
 
 Prerequisites:
 - Docker running
 - Ops Manager running and accessible
 - Output from deploy_ops_manager.py (creates both SingleCluster and MultiCluster projects)
 
-All tools (kind, kubectl) run inside Docker containers - no local installation required.
+Kind and Helm binaries are auto-downloaded if not found.
 """
 
 from __future__ import annotations
@@ -72,9 +69,6 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 KIND_NODE_IMAGE = constants.KIND_NODE_IMAGE
 KUBECTL_IMAGE = constants.KUBECTL_DOCKER_IMAGE
 OPERATOR_VERSION = constants.DEFAULT_OPERATOR_VERSION
-OPERATOR_CRDS_URL = constants.OPERATOR_CRDS_URL
-OPERATOR_INSTALL_URL = constants.OPERATOR_INSTALL_URL
-OPERATOR_MULTI_CLUSTER_URL = constants.OPERATOR_MULTI_CLUSTER_URL
 
 # kubectl-mongodb plugin URLs from constants
 KUBECTL_MONGODB_PLUGIN_VERSION = constants.KUBECTL_MONGODB_PLUGIN_VERSION
@@ -90,7 +84,6 @@ KIND_CLUSTER_CONFIG_TEMPLATE = "kind-cluster-config.yaml"
 # Multi-cluster specific constants from shared.constants
 CENTRAL_CLUSTER_NAME = constants.DEFAULT_CENTRAL_CLUSTER_NAME
 MEMBER_CLUSTER_NAME = constants.DEFAULT_MEMBER_CLUSTER_NAME
-OPERATOR_MULTI_CLUSTER_DEPLOYMENT_NAME = constants.OPERATOR_MULTI_CLUSTER_DEPLOYMENT_NAME
 
 
 # =============================================================================
@@ -725,7 +718,7 @@ metadata:
   name: {svc_name}
   namespace: {namespace}
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: {pod_name}
 spec:
   type: NodePort
@@ -735,7 +728,7 @@ spec:
     targetPort: 10901
     nodePort: {nodeport}
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: {pod_name}
 """
 
@@ -785,27 +778,21 @@ spec:
 # =============================================================================
 
 class MultiClusterOperatorDeployer:
-    """Deploys MongoDB Enterprise Kubernetes Operator for multi-cluster setup."""
+    """Deploys MCK (MongoDB Controllers for Kubernetes) for multi-cluster setup."""
 
     def __init__(self, k8s: MultiClusterKubernetesManager, credentials: OpsManagerCredentials,
                  config: MultiClusterConfig, yaml_manager: Optional[MultiClusterYAMLManager] = None,
-                 kubectl_mongodb_plugin: Optional[KubectlMongoDBPlugin] = None):
+                 kubectl_mongodb_plugin: Optional[KubectlMongoDBPlugin] = None,
+                 helm: Optional['HelmManager'] = None):
         self.k8s = k8s
         self.credentials = credentials
         self.config = config
         self.yaml_manager = yaml_manager or MultiClusterYAMLManager()
         self.plugin = kubectl_mongodb_plugin
 
-    def deploy_crds(self) -> bool:
-        """Deploy MongoDB CRDs to central cluster."""
-        logger.info("Deploying MongoDB CRDs to central cluster...")
-        try:
-            self.k8s.run_kubectl_central(["apply", "-f", OPERATOR_CRDS_URL])
-            logger.info("CRDs deployed successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to deploy CRDs: {e}")
-            return False
+        # Initialize Helm manager
+        from shared.helm_manager import HelmManager
+        self.helm = helm or HelmManager(binary_dir=SCRIPT_DIR / "bin")
 
     def run_multicluster_setup(self) -> bool:
         """Run kubectl mongodb multicluster setup command."""
@@ -827,27 +814,65 @@ class MultiClusterOperatorDeployer:
         )
 
     def deploy_operator(self) -> bool:
-        """Deploy the MongoDB Enterprise Kubernetes Operator (multi-cluster version)."""
-        logger.info(f"Deploying MongoDB Enterprise Kubernetes Operator v{OPERATOR_VERSION} (multi-cluster)...")
+        """Deploy MCK operator via Helm chart (multi-cluster mode).
+
+        Uses the same Helm chart as single-cluster but with multiCluster
+        values configured for cross-cluster operation.
+        """
+        logger.info(f"Deploying MCK v{OPERATOR_VERSION} via Helm (multi-cluster)...")
 
         try:
-            # Use the multi-cluster operator manifest instead of the standard one
-            self.k8s.run_kubectl_central(["apply", "-f", OPERATOR_MULTI_CLUSTER_URL])
-            logger.info("Multi-cluster operator resources applied successfully")
+            kubeconfig = self.k8s.kind_manager.central_kubeconfig
+            operator_ns = self.config.operator_namespace
 
-            # Configure operator to watch the replica set namespace
-            # Note: Multi-cluster operator deployment name is different
-            rs_namespace = self.config.rs_namespace
-            operator_namespace = self.config.operator_namespace
-            logger.info(f"Configuring operator to watch namespace: {rs_namespace}")
+            # Add MongoDB Helm repo
+            if not self.helm.repo_add(
+                constants.HELM_REPO_NAME,
+                constants.HELM_REPO_URL,
+                kubeconfig=kubeconfig
+            ):
+                return False
 
-            self.k8s.run_kubectl_central([
-                "set", "env", f"deployment/{OPERATOR_MULTI_CLUSTER_DEPLOYMENT_NAME}",
-                "-n", operator_namespace,
-                f"WATCH_NAMESPACE={rs_namespace}"
-            ])
+            # Get cluster context names for multi-cluster config
+            central_context = f"kind-{self.config.central_cluster_name}"
+            member_context = f"kind-{self.config.member_cluster_name}"
 
-            return True
+            release_name = constants.OPERATOR_RELEASE_NAME
+
+            # Check if release already exists
+            if self.helm.release_exists(release_name, operator_ns, kubeconfig=kubeconfig):
+                logger.info(f"Release '{release_name}' already exists, upgrading...")
+                return self.helm.upgrade(
+                    release_name=release_name,
+                    chart=constants.HELM_CHART_NAME,
+                    namespace=operator_ns,
+                    set_values={
+                        "operator.watchNamespace": self.config.rs_namespace,
+                        "operator.version": OPERATOR_VERSION,
+                        f"multiCluster.clusters[0]": central_context,
+                        f"multiCluster.clusters[1]": member_context,
+                        "multiCluster.kubeConfigSecretName": constants.MULTI_CLUSTER_KUBECONFIG_SECRET,
+                    },
+                    kubeconfig=kubeconfig
+                )
+
+            # Install MCK operator via Helm with multi-cluster config
+            # Don't use --wait: operator won't be ready until kubeconfig secret is created
+            return self.helm.install(
+                release_name=release_name,
+                chart=constants.HELM_CHART_NAME,
+                namespace=operator_ns,
+                create_namespace=True,
+                wait=False,
+                set_values={
+                    "operator.watchNamespace": self.config.rs_namespace,
+                    "operator.version": OPERATOR_VERSION,
+                    f"multiCluster.clusters[0]": central_context,
+                    f"multiCluster.clusters[1]": member_context,
+                    "multiCluster.kubeConfigSecretName": constants.MULTI_CLUSTER_KUBECONFIG_SECRET,
+                },
+                kubeconfig=kubeconfig
+            )
         except Exception as e:
             logger.error(f"Failed to deploy operator: {e}")
             return False
@@ -1038,19 +1063,22 @@ class MultiClusterOperatorDeployer:
         return self.k8s.apply_yaml(yaml_content, self.k8s.kind_manager.member_kubeconfig)
 
     def deploy_all(self) -> bool:
-        """Deploy all operator components for multi-cluster setup."""
+        """Deploy all operator components for multi-cluster setup.
+
+        Helm chart handles CRDs, operator deployment, and service accounts.
+        Additional steps: member list, kubeconfig secret, RBAC for RS namespace.
+        """
+        # Helm chart handles: CRDs, operator deployment, service accounts,
+        # ClusterRoles, and Roles/RoleBindings in watched namespaces.
+        # We need: member list, kubeconfig secret, member cluster NS/RBAC,
+        # and Ops Manager config.
         steps = [
             ("Running kubectl mongodb multicluster setup", self.run_multicluster_setup),
-            ("Creating operator namespace (central)", lambda: self.k8s.create_namespace(
-                self.config.operator_namespace, self.k8s.kind_manager.central_kubeconfig)),
             ("Creating RS namespace (central)", lambda: self.k8s.create_namespace(
                 self.config.rs_namespace, self.k8s.kind_manager.central_kubeconfig)),
-            ("Deploying CRDs", self.deploy_crds),
-            ("Deploying multi-cluster operator", self.deploy_operator),
+            ("Deploying MCK operator via Helm (multi-cluster)", self.deploy_operator),
             ("Creating member list ConfigMap", self.create_member_list_configmap),
             ("Creating kubeconfig secret", self.create_kubeconfig_secret),
-            ("Creating operator RBAC for RS namespace", self.deploy_operator_rbac),
-            ("Deploying database roles (central)", self.deploy_database_roles_central),
             ("Deploying member cluster resources", self.deploy_member_cluster_resources),
             ("Creating Ops Manager secret", self.create_ops_manager_secret),
             ("Creating Ops Manager ConfigMap", self.create_ops_manager_configmap),
@@ -1063,9 +1091,9 @@ class MultiClusterOperatorDeployer:
                 return False
             time.sleep(2)
 
-        # Wait for multi-cluster operator to be ready
+        # Wait for operator to be ready
         return self.k8s.wait_for_deployment(
-            OPERATOR_MULTI_CLUSTER_DEPLOYMENT_NAME,
+            constants.OPERATOR_DEPLOYMENT_NAME,
             self.config.operator_namespace,
             self.k8s.kind_manager.central_kubeconfig,
             timeout=180
@@ -1594,7 +1622,7 @@ class CrossClusterNetworkManager:
         try:
             result = self.k8s.run_kubectl([
                 "get", "pods", "-n", namespace,
-                "-l", "controller=mongodb-enterprise-operator",
+                "-l", "controller=mongodb-kubernetes-operator",
                 "-o", "jsonpath={range .items[*]}{.metadata.name}|{.status.podIP}\\n{end}"
             ], kubeconfig, check=False)
 
@@ -1875,7 +1903,7 @@ kubectl --kubeconfig {kubeconfig_dir / 'central-config'} \\
 
 # Check operator logs
 kubectl --kubeconfig {kubeconfig_dir / 'central-config'} \\
-  logs -n {config.operator_namespace} -l app.kubernetes.io/name=mongodb-enterprise-operator
+  logs -n {config.operator_namespace} -l app.kubernetes.io/name=mongodb-kubernetes-operator
 
 {'='*70}
 MONGODB CONNECTION
@@ -1902,7 +1930,7 @@ External ports:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Deploy MongoDB Enterprise Kubernetes Operator across multiple clusters",
+        description="Deploy MCK operator across multiple clusters",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -2173,7 +2201,7 @@ All tools (kind, kubectl) run via Docker - no local installation required!
         if not operator_deployer.deploy_all():
             logger.error("Failed to deploy MongoDB operator")
             sys.exit(1)
-        logger.info("MongoDB Enterprise Kubernetes Operator (multi-cluster) deployed successfully")
+        logger.info("MCK operator (multi-cluster) deployed successfully")
 
     # Set up initial cross-cluster networking (iptables + CoreDNS with fallback IPs)
     # This is done before MongoDB deployment to ensure DNS resolution is available
@@ -2207,7 +2235,7 @@ All tools (kind, kubectl) run via Docker - no local installation required!
                 logger.error(format_error_with_suggestion(
                     "MongoDB did not reach Running state within timeout",
                     "Check operator logs for details",
-                    f"kubectl --kubeconfig {kind_manager.central_kubeconfig} logs -n {config.operator_namespace} -l app.kubernetes.io/name=mongodb-enterprise-operator"
+                    f"kubectl --kubeconfig {kind_manager.central_kubeconfig} logs -n {config.operator_namespace} -l app.kubernetes.io/name=mongodb-kubernetes-operator"
                 ))
                 sys.exit(1)
 

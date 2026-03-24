@@ -422,7 +422,7 @@ rm -f eks-central-config.yaml eks-member-config.yaml
 
 Once the EKS infrastructure is provisioned, proceed to deploy MongoDB:
 
-**[MANUAL_DEPLOYMENT_EKS_MULTI.md](MANUAL_DEPLOYMENT_EKS_MULTI.md)** - Deploy MongoDB Enterprise Kubernetes Operator and multi-cluster replica set
+**[MANUAL_DEPLOYMENT_EKS_MULTI.md](MANUAL_DEPLOYMENT_EKS_MULTI.md)** - Deploy MCK (MongoDB Controllers for Kubernetes) operator and multi-cluster replica set
 
 ---
 

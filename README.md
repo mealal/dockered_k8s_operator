@@ -1,13 +1,13 @@
-# MongoDB Enterprise Kubernetes Operator POC
+# MongoDB Controllers for Kubernetes (MCK) POC
 
-A proof-of-concept for deploying MongoDB Enterprise Kubernetes Operator with Ops Manager running in Docker containers.
+A proof-of-concept for deploying MongoDB Controllers for Kubernetes (MCK) with Ops Manager running in Docker containers.
 
 ## Overview
 
 This project provides automated deployment scripts for:
 
 1. **MongoDB Ops Manager** - Running in Docker with HTTPS enabled
-2. **MongoDB Enterprise Kubernetes Operator** - Deployed to a kind (Kubernetes IN Docker) cluster
+2. **MCK (MongoDB Controllers for Kubernetes)** - Deployed to a kind (Kubernetes IN Docker) cluster via Helm
 3. **MongoDB Replica Set** - Managed by the operator and registered in Ops Manager
 4. **MongoDB Community Search** - Community 8.2 with standalone mongot for `$search` / `$vectorSearch` (Docker, Ops Manager-managed)
 
@@ -28,8 +28,8 @@ This project provides automated deployment scripts for:
 
 ```
 +------------------+     +------------------------+     +---------------------+
-|  Ops Manager     |<--->|  MongoDB Enterprise    |<--->|  MongoDB Replica    |
-|  (Docker)        |     |  K8s Operator (kind)   |     |  Set (kind)         |
+|  Ops Manager     |<--->|  MCK Operator          |<--->|  MongoDB Replica    |
+|  (Docker)        |     |  (kind, Helm)          |     |  Set (kind)         |
 +------------------+     +------------------------+     +---------------------+
      |                          |
      v                          v
@@ -74,13 +74,13 @@ This project has been tested with the following versions:
 | MongoDB Enterprise Server | 7.0.25-ent | Configured in K8s templates |
 | MongoDB Community Server | 8.2.5 | For Community Search deployment |
 | mongot (Community Search) | 0.60.1 | Standalone search engine for `$search` / `$vectorSearch` |
-| MongoDB Enterprise K8s Operator | 1.33.x | Latest stable |
+| MCK (MongoDB Controllers for Kubernetes) | 1.7.0 | Latest stable, Helm-based |
 | Kubernetes (kind) | 1.28.x | Kind v0.20+ recommended |
 | Python | 3.8+ | 3.10+ recommended |
 | Docker | 24.0+ | Docker Desktop or Engine |
 
 > **Note**: For the latest operator compatibility matrix, see the
-> [MongoDB Kubernetes Operator compatibility page](https://www.mongodb.com/docs/kubernetes-operator/stable/reference/compatibility/).
+> [MCK compatibility page](https://www.mongodb.com/docs/kubernetes/current/reference/compatibility/).
 
 ## System Requirements
 
@@ -99,6 +99,7 @@ This project has been tested with the following versions:
 - **Python 3.8+** - For deployment scripts
 - **OpenSSL** - For TLS certificate generation
 - **kubectl** - Kubernetes CLI (optional, can use Docker-based kubectl)
+- **Helm** v3.x - For MCK operator deployment (auto-downloaded by scripts if not present)
 
 ### Verify Prerequisites
 
@@ -141,7 +142,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 | Skip SSL verification (testing) | `--ssl-skip-verify --skip-preflight` |
 | Don't wait for Running state | `--no-wait` |
 | Show passwords in output | `--show-password` |
-| View operator logs | `kubectl --kubeconfig .kube/config logs -n mongodb -l app.kubernetes.io/name=mongodb-enterprise-operator` |
+| View operator logs | `kubectl --kubeconfig .kube/config logs -n mongodb -l app.kubernetes.io/name=mongodb-kubernetes-operator` |
 
 ## Deployment Workflow
 
@@ -206,7 +207,7 @@ python deploy_mongodb_k8s.py
 
 This will:
 - Create a kind cluster with port mappings for external access
-- Deploy MongoDB Enterprise Kubernetes Operator
+- Deploy MCK (MongoDB Controllers for Kubernetes) operator via Helm
 - Configure connection to Ops Manager
 - Deploy a 3-member MongoDB replica set with TLS and authentication enabled
 - Create both SCRAM and X509 users
@@ -690,7 +691,7 @@ Check for events mentioning insufficient CPU, memory, or PVC issues.
 
 ```bash
 kubectl --kubeconfig .kube/config logs -n mongodb \
-  -l app.kubernetes.io/name=mongodb-enterprise-operator
+  -l app.kubernetes.io/name=mongodb-kubernetes-operator
 ```
 
 #### MongoDB Pod Logs
@@ -737,10 +738,10 @@ kubectl --kubeconfig .kube/config port-forward -n eksrsoppoc1d mongodb-rs-0 1090
 - [SSL Certificate Bypass](SSL_CERTIFICATE_BYPASS.md) - Documentation on SSL certificate bypass for testing
 
 ### External References
-- [MongoDB Enterprise Kubernetes Operator Docs](https://www.mongodb.com/docs/kubernetes-operator/stable/)
+- [MongoDB Controllers for Kubernetes (MCK) Docs](https://www.mongodb.com/docs/kubernetes/current/)
 - [MongoDB Ops Manager Docs](https://www.mongodb.com/docs/ops-manager/current/)
-- [External Connectivity Guide](https://www.mongodb.com/docs/kubernetes-operator/v1.33/tutorial/connect-from-outside-k8s/)
-- [Multi-Cluster Overview](https://www.mongodb.com/docs/kubernetes-operator/v1.33/multi-cluster-overview/)
+- [External Connectivity Guide](https://www.mongodb.com/docs/kubernetes/current/tutorial/connect-from-outside-k8s/)
+- [Multi-Cluster Overview](https://www.mongodb.com/docs/kubernetes/current/multi-cluster-overview/)
 
 ## License
 

@@ -438,7 +438,7 @@ def format_health_check_result(result: HealthCheckResult, verbose: bool = False)
         lines.append("")
         lines.append("Troubleshooting Tips:")
         lines.append("  1. Verify MongoDB pods are running: kubectl get pods -n mongodb-rs")
-        lines.append("  2. Check operator logs: kubectl logs -n mongodb -l app.kubernetes.io/name=mongodb-enterprise-operator")
+        lines.append("  2. Check operator logs: kubectl logs -n mongodb -l app.kubernetes.io/name=mongodb-kubernetes-operator")
         lines.append("  3. Verify port mappings: docker port <cluster-name>-control-plane")
         lines.append("  4. Check firewall allows connections to the MongoDB ports")
 

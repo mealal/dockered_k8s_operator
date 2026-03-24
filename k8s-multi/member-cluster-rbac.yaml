@@ -12,30 +12,30 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
   labels:
-    app.kubernetes.io/name: mongodb-enterprise-database-pods
+    app.kubernetes.io/name: mongodb-kubernetes-database-pods
     app.kubernetes.io/component: serviceaccount
     app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: mongodb-enterprise-appdb
+  name: mongodb-kubernetes-appdb
   namespace: eksrsoppoc1d
   labels:
-    app.kubernetes.io/name: mongodb-enterprise-appdb
+    app.kubernetes.io/name: mongodb-kubernetes-appdb
     app.kubernetes.io/component: serviceaccount
     app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
   labels:
-    app.kubernetes.io/name: mongodb-enterprise-database-pods
+    app.kubernetes.io/name: mongodb-kubernetes-database-pods
     app.kubernetes.io/component: rbac
     app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
 rules:
@@ -49,28 +49,28 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
   labels:
-    app.kubernetes.io/name: mongodb-enterprise-database-pods
+    app.kubernetes.io/name: mongodb-kubernetes-database-pods
     app.kubernetes.io/component: rbac
     app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
 subjects:
   - kind: ServiceAccount
-    name: mongodb-enterprise-database-pods
+    name: mongodb-kubernetes-database-pods
     namespace: eksrsoppoc1d
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: mongodb-enterprise-operator-remote
+  name: mongodb-kubernetes-operator-remote
   namespace: eksrsoppoc1d
   labels:
-    app.kubernetes.io/name: mongodb-enterprise-operator-remote
+    app.kubernetes.io/name: mongodb-kubernetes-operator-remote
     app.kubernetes.io/component: rbac
     app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
 rules:

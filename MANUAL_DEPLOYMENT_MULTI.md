@@ -1,6 +1,6 @@
-# MongoDB Enterprise Kubernetes Operator - Multi-Cluster Manual Deployment Guide
+# MCK (MongoDB Controllers for Kubernetes) - Multi-Cluster Manual Deployment Guide
 
-This guide provides step-by-step instructions for manually deploying MongoDB across multiple Kubernetes clusters using the MongoDB Enterprise Kubernetes Operator. These steps replicate what the `deploy_mongodb_k8s_multi.py` script does automatically.
+This guide provides step-by-step instructions for manually deploying MongoDB across multiple Kubernetes clusters using MCK (MongoDB Controllers for Kubernetes). These steps replicate what the `deploy_mongodb_k8s_multi.py` script does automatically.
 
 ## Prerequisites
 
@@ -122,7 +122,7 @@ kind get kubeconfig --name mongodb-central > .kube-multi/central-config
 kind get kubeconfig --name mongodb-member-1 > .kube-multi/member-config
 ```
 
-### Step 2: Create Namespaces and Deploy CRDs
+### Step 2: Create Namespaces
 
 ```bash
 export KUBECONFIG=./.kube-multi/central-config
@@ -130,9 +130,6 @@ export KUBECONFIG=./.kube-multi/central-config
 # Create namespaces on central cluster
 kubectl create namespace mongodb
 kubectl create namespace eksrsoppoc1d
-
-# Deploy CRDs
-kubectl apply -f https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/crds.yaml
 
 # Create namespace on member cluster
 kubectl --kubeconfig ./.kube-multi/member-config create namespace eksrsoppoc1d
@@ -149,7 +146,7 @@ kubectl apply -f - << 'EOF'
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: mongodb-enterprise-operator-member-list
+  name: mongodb-kubernetes-operator-member-list
   namespace: mongodb
 data:
   kind-mongodb-central: ""
@@ -212,26 +209,31 @@ EOF
 
 # Create the secret
 export KUBECONFIG=./.kube-multi/central-config
-kubectl create secret generic mongodb-enterprise-operator-multi-cluster-kubeconfig \
+kubectl create secret generic mongodb-kubernetes-operator-multi-cluster-kubeconfig \
   -n mongodb \
   --from-file=kubeconfig=./.kube-multi/operator-kubeconfig.yaml
 ```
 
-### Step 5: Deploy Multi-Cluster Operator
+### Step 5: Deploy MCK Operator via Helm
 
 Now that the kubeconfig secret exists, deploy the operator:
 
 ```bash
 export KUBECONFIG=./.kube-multi/central-config
 
-# Deploy MULTI-CLUSTER operator
-kubectl apply -f https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/mongodb-enterprise-multi-cluster.yaml
+# Deploy MCK operator with multi-cluster configuration via Helm
+helm repo add mongodb https://mongodb.github.io/helm-charts
+helm repo update
 
-# Configure operator to watch eksrsoppoc1d namespace
-kubectl set env deployment/mongodb-enterprise-operator-multi-cluster -n mongodb WATCH_NAMESPACE=eksrsoppoc1d
+helm install mongodb-kubernetes-operator mongodb/mongodb-kubernetes \
+  --namespace mongodb --create-namespace \
+  --set operator.watchNamespace=eksrsoppoc1d \
+  --set multiCluster.clusters[0]=kind-mongodb-central \
+  --set multiCluster.clusters[1]=kind-mongodb-member-1 \
+  --set multiCluster.kubeConfigSecretName=mongodb-kubernetes-operator-multi-cluster-kubeconfig
 
 # Wait for operator to be ready
-kubectl wait --for=condition=available deployment/mongodb-enterprise-operator-multi-cluster -n mongodb --timeout=180s
+kubectl wait --for=condition=available deployment/mongodb-kubernetes-operator -n mongodb --timeout=180s
 ```
 
 ### Step 6: Deploy RBAC on Central Cluster
@@ -244,7 +246,7 @@ kubectl apply -f - << 'EOF'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: mongodb-enterprise-operator
+  name: mongodb-kubernetes-operator
   namespace: eksrsoppoc1d
 rules:
 - apiGroups: [""]
@@ -260,15 +262,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: mongodb-enterprise-operator
+  name: mongodb-kubernetes-operator
   namespace: eksrsoppoc1d
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: mongodb-enterprise-operator
+  name: mongodb-kubernetes-operator
 subjects:
 - kind: ServiceAccount
-  name: mongodb-enterprise-operator-multi-cluster
+  name: mongodb-kubernetes-operator
   namespace: mongodb
 EOF
 
@@ -277,19 +279,19 @@ kubectl apply -f - << 'EOF'
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: mongodb-enterprise-appdb
+  name: mongodb-kubernetes-appdb
   namespace: eksrsoppoc1d
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
 rules:
 - apiGroups: [""]
@@ -302,15 +304,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
 subjects:
 - kind: ServiceAccount
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
 EOF
 ```
@@ -325,19 +327,19 @@ kubectl apply -f - << 'EOF'
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: mongodb-enterprise-appdb
+  name: mongodb-kubernetes-appdb
   namespace: eksrsoppoc1d
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
 rules:
 - apiGroups: [""]
@@ -350,15 +352,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
 subjects:
 - kind: ServiceAccount
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
 EOF
 ```
@@ -640,7 +642,7 @@ metadata:
   name: mongodb-multi-rs-0-0-svc-external
   namespace: eksrsoppoc1d
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-0
 spec:
   type: NodePort
@@ -650,7 +652,7 @@ spec:
     targetPort: 10901
     nodePort: 30100
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-0
 ---
 apiVersion: v1
@@ -659,7 +661,7 @@ metadata:
   name: mongodb-multi-rs-0-1-svc-external
   namespace: eksrsoppoc1d
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-1
 spec:
   type: NodePort
@@ -669,7 +671,7 @@ spec:
     targetPort: 10901
     nodePort: 30101
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-1
 ---
 apiVersion: v1
@@ -678,7 +680,7 @@ metadata:
   name: mongodb-multi-rs-0-2-svc-external
   namespace: eksrsoppoc1d
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-2
 spec:
   type: NodePort
@@ -688,7 +690,7 @@ spec:
     targetPort: 10901
     nodePort: 30102
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-2
 EOF
 
@@ -700,7 +702,7 @@ metadata:
   name: mongodb-multi-rs-1-0-svc-external
   namespace: eksrsoppoc1d
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-0
 spec:
   type: NodePort
@@ -710,7 +712,7 @@ spec:
     targetPort: 10901
     nodePort: 30200
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-0
 ---
 apiVersion: v1
@@ -719,7 +721,7 @@ metadata:
   name: mongodb-multi-rs-1-1-svc-external
   namespace: eksrsoppoc1d
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-1
 spec:
   type: NodePort
@@ -729,7 +731,7 @@ spec:
     targetPort: 10901
     nodePort: 30201
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-1
 EOF
 ```
@@ -948,7 +950,7 @@ kubectl get pods -n eksrsoppoc1d
 kubectl --kubeconfig ./.kube-multi/member-config get pods -n eksrsoppoc1d
 
 # Check operator logs
-kubectl logs -n mongodb deployment/mongodb-enterprise-operator-multi-cluster --tail=100
+kubectl logs -n mongodb deployment/mongodb-kubernetes-operator --tail=100
 ```
 
 ## Connection Instructions
@@ -985,21 +987,21 @@ rm -rf .kube-multi/ certs/mongodb-multi/
 
 ### Operator pod stuck in ContainerCreating
 
-The multi-cluster operator requires the kubeconfig secret BEFORE it starts:
+The operator requires the kubeconfig secret BEFORE it starts:
 ```bash
-kubectl get secret mongodb-enterprise-operator-multi-cluster-kubeconfig -n mongodb
+kubectl get secret mongodb-kubernetes-operator-multi-cluster-kubeconfig -n mongodb
 ```
 
 ### Operator not reconciling
 
 Check operator logs:
 ```bash
-kubectl logs -n mongodb deployment/mongodb-enterprise-operator-multi-cluster --tail=50
+kubectl logs -n mongodb deployment/mongodb-kubernetes-operator --tail=50
 ```
 
 Verify member list ConfigMap format (cluster names as KEYS):
 ```bash
-kubectl get configmap mongodb-enterprise-operator-member-list -n mongodb -o yaml
+kubectl get configmap mongodb-kubernetes-operator-member-list -n mongodb -o yaml
 ```
 
 ### Pods running but MongoDBMultiCluster stuck in Pending/Failed

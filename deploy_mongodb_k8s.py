@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-MongoDB Enterprise Kubernetes Operator Deployment
+MongoDB Kubernetes Operator (MCK) Deployment
 
 This script:
-1. Deploys a Kubernetes cluster in Docker using kind (via Docker container)
-2. Deploys the MongoDB Enterprise Kubernetes Operator
+1. Deploys a Kubernetes cluster in Docker using kind
+2. Deploys MCK (MongoDB Controllers for Kubernetes) via Helm
 3. Configures the operator to connect to Ops Manager
 4. Deploys a 3-node MongoDB replica set
 
@@ -13,7 +13,7 @@ Prerequisites:
 - Output from deploy_ops_manager.py (ops-manager-api-key.json)
 - Ops Manager running and accessible
 
-All tools (kind, kubectl) run inside Docker containers - no local installation required.
+Kind binary is auto-downloaded. Helm binary is auto-downloaded if not found.
 """
 
 from __future__ import annotations
@@ -68,8 +68,6 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 KIND_NODE_IMAGE = constants.KIND_NODE_IMAGE
 KUBECTL_IMAGE = constants.KUBECTL_DOCKER_IMAGE
 OPERATOR_VERSION = constants.DEFAULT_OPERATOR_VERSION
-OPERATOR_CRDS_URL = constants.OPERATOR_CRDS_URL
-OPERATOR_INSTALL_URL = constants.OPERATOR_INSTALL_URL
 
 # YAML template directory
 K8S_YAML_DIR = SCRIPT_DIR / constants.SINGLE_CLUSTER_TEMPLATES
@@ -467,14 +465,19 @@ class KubernetesManager(BaseKubernetesManager):
 
 
 class MongoDBOperatorDeployer:
-    """Deploys MongoDB Enterprise Kubernetes Operator."""
+    """Deploys MCK (MongoDB Controllers for Kubernetes) operator via Helm."""
 
     def __init__(self, k8s: KubernetesManager, credentials: OpsManagerCredentials,
-                 cluster_config: ClusterConfig, yaml_manager: Optional[YAMLTemplateManager] = None):
+                 cluster_config: ClusterConfig, yaml_manager: Optional[YAMLTemplateManager] = None,
+                 helm: Optional['HelmManager'] = None):
         self.k8s = k8s
         self.credentials = credentials
         self.cluster_config = cluster_config
         self.yaml_manager = yaml_manager or YAMLTemplateManager()
+
+        # Initialize Helm manager
+        from shared.helm_manager import HelmManager
+        self.helm = helm or HelmManager(binary_dir=SCRIPT_DIR / "bin")
 
     @retry_with_backoff(max_retries=3, exceptions=(subprocess.CalledProcessError,))
     def create_ops_manager_secret(self) -> bool:
@@ -565,42 +568,52 @@ class MongoDBOperatorDeployer:
         yaml_content = yaml_path.read_text(encoding='utf-8')
         return self.k8s.apply_yaml(yaml_content)
 
-    def deploy_crds(self) -> bool:
-        """Deploy MongoDB CRDs from official GitHub repository."""
-        logger.info("Deploying MongoDB CRDs from official repository...")
-
-        try:
-            self.k8s.run_kubectl(["apply", "-f", OPERATOR_CRDS_URL])
-            logger.info("CRDs deployed successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to deploy CRDs: {e}")
-            return False
-
     def deploy_operator(self) -> bool:
-        """Deploy the MongoDB Enterprise Kubernetes Operator from official GitHub repository."""
-        logger.info(f"Deploying MongoDB Enterprise Kubernetes Operator v{OPERATOR_VERSION}...")
-        logger.info(f"Using official installation from: {OPERATOR_INSTALL_URL}")
+        """Deploy MCK operator via Helm chart.
+
+        Installs CRDs automatically as part of the Helm chart.
+        Configures the operator to watch the replica set namespace.
+        """
+        logger.info(f"Deploying MCK (MongoDB Controllers for Kubernetes) v{OPERATOR_VERSION} via Helm...")
 
         try:
-            # Apply the official operator YAML from GitHub (installs to 'mongodb' namespace by default)
-            self.k8s.run_kubectl(["apply", "-f", OPERATOR_INSTALL_URL])
-            logger.info("Operator resources applied successfully")
+            # Add MongoDB Helm repo
+            kubeconfig = self.k8s.kubeconfig_file
+            if not self.helm.repo_add(
+                constants.HELM_REPO_NAME,
+                constants.HELM_REPO_URL,
+                kubeconfig=kubeconfig
+            ):
+                return False
 
-            # Configure operator to watch the replica set namespace
-            rs_namespace = self.cluster_config.rs_namespace
-            operator_namespace = self.cluster_config.operator_namespace
-            logger.info(f"Configuring operator to watch namespace: {rs_namespace}")
+            # Check if release already exists
+            release_name = constants.OPERATOR_RELEASE_NAME
+            operator_ns = self.cluster_config.operator_namespace
+            if self.helm.release_exists(release_name, operator_ns, kubeconfig=kubeconfig):
+                logger.info(f"Release '{release_name}' already exists, upgrading...")
+                return self.helm.upgrade(
+                    release_name=release_name,
+                    chart=constants.HELM_CHART_NAME,
+                    namespace=operator_ns,
+                    set_values={
+                        "operator.watchNamespace": self.cluster_config.rs_namespace,
+                        "operator.version": OPERATOR_VERSION,
+                    },
+                    kubeconfig=kubeconfig
+                )
 
-            # Set WATCH_NAMESPACE environment variable
-            self.k8s.run_kubectl([
-                "set", "env", "deployment/mongodb-enterprise-operator",
-                "-n", operator_namespace,
-                f"WATCH_NAMESPACE={rs_namespace}"
-            ])
-            logger.info(f"Operator configured to watch {rs_namespace} namespace")
-
-            return True
+            # Install MCK operator via Helm
+            return self.helm.install(
+                release_name=release_name,
+                chart=constants.HELM_CHART_NAME,
+                namespace=operator_ns,
+                create_namespace=True,
+                set_values={
+                    "operator.watchNamespace": self.cluster_config.rs_namespace,
+                    "operator.version": OPERATOR_VERSION,
+                },
+                kubeconfig=kubeconfig
+            )
         except Exception as e:
             logger.error(f"Failed to deploy operator: {e}")
             return False
@@ -639,21 +652,17 @@ class MongoDBOperatorDeployer:
     def deploy_all(self) -> bool:
         """Deploy all operator components.
 
-        Creates two namespaces:
-        - operator_namespace (mongodb): For the operator deployment
-        - rs_namespace (mongodb-rs): For replica set, secrets, and configmaps
+        Creates replica set namespace, deploys MCK operator via Helm
+        (which includes CRDs, RBAC, and the operator deployment),
+        then creates additional RBAC and Ops Manager configuration.
         """
-        # Note: The official mongodb-enterprise.yaml already includes:
-        # - Service accounts (operator, appdb, database-pods, ops-manager)
-        # - ClusterRoles and RoleBindings
-        # - The operator deployment (in 'mongodb' namespace by default)
+        # Helm chart handles: CRDs, operator deployment, service accounts,
+        # ClusterRoles, Roles/RoleBindings in both operator and watched
+        # namespaces, and database pod service accounts. We only need
+        # to create Ops Manager secrets and configmaps.
         steps = [
-            ("Creating operator namespace", lambda: self.k8s.create_operator_namespace()),
             ("Creating replica set namespace", lambda: self.k8s.create_rs_namespace()),
-            ("Deploying CRDs", self.deploy_crds),
-            ("Deploying operator", self.deploy_operator),
-            ("Creating operator RBAC for RS namespace", self.deploy_operator_rbac_for_rs_namespace),
-            ("Deploying database roles in RS namespace", self.deploy_database_roles),
+            ("Deploying MCK operator via Helm", self.deploy_operator),
             ("Creating Ops Manager secret", self.create_ops_manager_secret),
         ]
 
@@ -672,7 +681,7 @@ class MongoDBOperatorDeployer:
 
         # Wait for operator to be ready (in operator namespace)
         return self.k8s.wait_for_deployment(
-            "mongodb-enterprise-operator",
+            constants.OPERATOR_DEPLOYMENT_NAME,
             self.cluster_config.operator_namespace,
             timeout=180
         )
@@ -958,7 +967,7 @@ metadata:
   name: {svc_name}
   namespace: {rs_namespace}
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: {pod_name}
 spec:
   type: NodePort
@@ -968,7 +977,7 @@ spec:
     targetPort: 10901
     nodePort: {target_port}
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: {pod_name}
 """
 
@@ -1018,7 +1027,7 @@ Namespaces:
    kubectl get pods -n {rs_ns}
    kubectl get mongodb -n {rs_ns}
    kubectl describe mongodb mongodb-rs -n {rs_ns}
-   kubectl logs -n {op_ns} -l app.kubernetes.io/name=mongodb-enterprise-operator
+   kubectl logs -n {op_ns} -l app.kubernetes.io/name=mongodb-kubernetes-operator
 
 2. USING KUBECTL VIA DOCKER (no installation required):
 
@@ -1045,7 +1054,7 @@ kubectl cluster-info
 
 # View operator (in {op_ns} namespace)
 kubectl get all -n {op_ns}
-kubectl logs -n {op_ns} -l app.kubernetes.io/name=mongodb-enterprise-operator
+kubectl logs -n {op_ns} -l app.kubernetes.io/name=mongodb-kubernetes-operator
 
 # View MongoDB resources (in {rs_ns} namespace)
 kubectl get all -n {rs_ns}
@@ -1067,7 +1076,7 @@ kubectl port-forward -n {rs_ns} svc/mongodb-rs-svc 27017:27017
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Deploy MongoDB Enterprise Kubernetes Operator with replica set",
+        description="Deploy MCK operator with MongoDB replica set",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -1178,8 +1187,7 @@ All tools (kind, kubectl) run via Docker - no local installation required!
         logger.info(f"  3. Create replica set namespace: {cluster_config.rs_namespace}")
         if not args.skip_operator:
             logger.info(f"  4. Deploy MongoDB Operator v{OPERATOR_VERSION}")
-            logger.info(f"     - Deploy CRDs from: {OPERATOR_CRDS_URL}")
-            logger.info(f"     - Deploy operator from: {OPERATOR_INSTALL_URL}")
+            logger.info(f"     - Install MCK operator via Helm chart: {constants.HELM_CHART_NAME}")
             logger.info(f"     - Create database roles in {cluster_config.rs_namespace}")
             logger.info(f"     - Create Ops Manager secret and ConfigMaps in {cluster_config.rs_namespace}")
         if not args.skip_replica_set:
@@ -1327,7 +1335,7 @@ All tools (kind, kubectl) run via Docker - no local installation required!
         if not operator_deployer.deploy_all():
             logger.error("Failed to deploy MongoDB operator")
             sys.exit(1)
-        logger.info("MongoDB Enterprise Kubernetes Operator deployed successfully")
+        logger.info("MCK operator deployed successfully")
 
     # Deploy replica set
     if not args.skip_replica_set:

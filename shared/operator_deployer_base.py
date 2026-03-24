@@ -2,7 +2,10 @@
 Base Operator Deployer for MongoDB Kubernetes deployment scripts.
 
 Contains the common functionality shared between single-cluster and multi-cluster
-operator deployers, including CRD deployment, secret creation, and RBAC setup.
+operator deployers, including Helm-based operator deployment, secret creation,
+and RBAC setup.
+
+Uses MCK (MongoDB Controllers for Kubernetes) deployed via Helm.
 """
 
 import logging
@@ -14,22 +17,18 @@ from shared.decorators import retry_with_backoff
 from shared.models import OpsManagerCredentials
 from shared.k8s_manager_base import BaseKubernetesManager
 from shared.yaml_manager_base import BaseYAMLTemplateManager
+from shared.helm_manager import HelmManager
 from shared import constants
 
 logger = logging.getLogger(__name__)
-
-# Official MongoDB Enterprise Kubernetes Operator URLs - imported from constants
-OPERATOR_CRDS_URL = constants.OPERATOR_CRDS_URL
-OPERATOR_INSTALL_URL = constants.OPERATOR_INSTALL_URL
-OPERATOR_MULTI_CLUSTER_URL = constants.OPERATOR_MULTI_CLUSTER_URL
 
 
 class BaseOperatorDeployer:
     """Base class for MongoDB operator deployers.
 
-    Provides common functionality for deploying the MongoDB Enterprise Kubernetes
-    Operator including:
-    - CRD deployment
+    Provides common functionality for deploying the MCK (MongoDB Controllers
+    for Kubernetes) operator via Helm, including:
+    - Helm-based operator deployment (CRDs included in chart)
     - Ops Manager secret and configmap creation
     - RBAC configuration
     - Database roles deployment
@@ -51,7 +50,8 @@ class BaseOperatorDeployer:
         rs_namespace: str,
         operator_namespace: str,
         ops_manager_url: str,
-        ssl_skip_verify: bool = False
+        ssl_skip_verify: bool = False,
+        helm: Optional[HelmManager] = None
     ):
         """Initialize the operator deployer.
 
@@ -63,6 +63,7 @@ class BaseOperatorDeployer:
             operator_namespace: Namespace for operator deployment
             ops_manager_url: URL of Ops Manager instance
             ssl_skip_verify: Whether to skip SSL verification
+            helm: Optional HelmManager instance (created if not provided)
         """
         self.k8s = k8s
         self.credentials = credentials
@@ -71,24 +72,7 @@ class BaseOperatorDeployer:
         self.operator_namespace = operator_namespace
         self.ops_manager_url = ops_manager_url
         self.ssl_skip_verify = ssl_skip_verify
-
-    def deploy_crds(self, kubeconfig: Path) -> bool:
-        """Deploy MongoDB CRDs from official GitHub repository.
-
-        Args:
-            kubeconfig: Path to kubeconfig file
-
-        Returns:
-            True if CRDs deployed successfully, False on error
-        """
-        logger.info("Deploying MongoDB CRDs from official repository...")
-        try:
-            self.k8s.run_kubectl(["apply", "-f", OPERATOR_CRDS_URL], kubeconfig)
-            logger.info("CRDs deployed successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to deploy CRDs: {e}")
-            return False
+        self.helm = helm
 
     @retry_with_backoff(max_retries=3, exceptions=(subprocess.CalledProcessError,))
     def create_ops_manager_secret(self, kubeconfig: Path) -> bool:

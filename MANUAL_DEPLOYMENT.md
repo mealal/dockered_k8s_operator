@@ -1,6 +1,6 @@
-# MongoDB Enterprise Kubernetes Manual Deployment Guide
+# MongoDB Controllers for Kubernetes (MCK) Manual Deployment Guide
 
-This guide provides step-by-step instructions for manually deploying MongoDB on Kubernetes using the MongoDB Enterprise Kubernetes Operator with Ops Manager.
+This guide provides step-by-step instructions for manually deploying MongoDB on Kubernetes using MCK (MongoDB Controllers for Kubernetes) with Ops Manager.
 
 ## Estimated Time
 
@@ -86,7 +86,7 @@ kubectl --kubeconfig .kube/config get nodes
 
 ---
 
-## Step 2: Deploy MongoDB Enterprise Kubernetes Operator
+## Step 2: Deploy MCK (MongoDB Controllers for Kubernetes) Operator
 
 ### 2.1 Create Operator Namespace
 
@@ -124,28 +124,21 @@ metadata:
 kubectl --kubeconfig .kube/config apply -f mongodb-rs-namespace.yaml
 ```
 
-### 2.3 Deploy CRDs
+### 2.3 Deploy CRDs and Operator via Helm
+
+MCK 1.7.0 uses Helm for deployment (CRDs are installed automatically by the Helm chart):
 
 ```bash
-kubectl --kubeconfig .kube/config apply -f \
-  https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/crds.yaml
+helm repo add mongodb https://mongodb.github.io/helm-charts
+helm repo update
+
+helm install mongodb-kubernetes-operator mongodb/mongodb-kubernetes \
+  --namespace mongodb --create-namespace \
+  --set operator.watchNamespace=eksrsoppoc1d \
+  --kubeconfig .kube/config
 ```
 
-### 2.4 Deploy the Operator
-
-```bash
-kubectl --kubeconfig .kube/config apply -f \
-  https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes/master/mongodb-enterprise.yaml
-```
-
-### 2.5 Configure Operator to Watch eksrsoppoc1d Namespace
-
-```bash
-kubectl --kubeconfig .kube/config set env deployment/mongodb-enterprise-operator \
-  -n mongodb WATCH_NAMESPACE=eksrsoppoc1d
-```
-
-### 2.6 Create RBAC for Operator
+### 2.4 Create RBAC for Operator
 
 Save as `operator-rbac.yaml` and apply:
 
@@ -153,7 +146,7 @@ Save as `operator-rbac.yaml` and apply:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: mongodb-enterprise-operator
+  name: mongodb-kubernetes-operator
   namespace: eksrsoppoc1d
 rules:
   - apiGroups: [""]
@@ -178,15 +171,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: mongodb-enterprise-operator
+  name: mongodb-kubernetes-operator
   namespace: eksrsoppoc1d
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: mongodb-enterprise-operator
+  name: mongodb-kubernetes-operator
 subjects:
   - kind: ServiceAccount
-    name: mongodb-enterprise-operator
+    name: mongodb-kubernetes-operator
     namespace: mongodb
 ```
 
@@ -194,7 +187,7 @@ subjects:
 kubectl --kubeconfig .kube/config apply -f operator-rbac.yaml
 ```
 
-### 2.7 Create Database Roles
+### 2.5 Create Database Roles
 
 Save as `database-roles.yaml` and apply:
 
@@ -202,19 +195,19 @@ Save as `database-roles.yaml` and apply:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: mongodb-enterprise-appdb
+  name: mongodb-kubernetes-appdb
   namespace: eksrsoppoc1d
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
 rules:
   - apiGroups: [""]
@@ -227,15 +220,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
   namespace: eksrsoppoc1d
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: mongodb-enterprise-database-pods
+  name: mongodb-kubernetes-database-pods
 subjects:
   - kind: ServiceAccount
-    name: mongodb-enterprise-database-pods
+    name: mongodb-kubernetes-database-pods
     namespace: eksrsoppoc1d
 ```
 
@@ -243,11 +236,11 @@ subjects:
 kubectl --kubeconfig .kube/config apply -f database-roles.yaml
 ```
 
-### 2.8 Verify Operator Deployment
+### 2.6 Verify Operator Deployment
 
 ```bash
 kubectl --kubeconfig .kube/config wait --for=condition=available \
-  deployment/mongodb-enterprise-operator -n mongodb --timeout=180s
+  deployment/mongodb-kubernetes-operator -n mongodb --timeout=180s
 
 kubectl --kubeconfig .kube/config get pods -n mongodb
 ```
@@ -457,7 +450,7 @@ metadata:
   name: mongodb-rs-0-svc-external
   namespace: eksrsoppoc1d
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-rs-0
 spec:
   type: NodePort
@@ -467,7 +460,7 @@ spec:
     targetPort: 10901
     nodePort: 30000
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-rs-0
 ---
 apiVersion: v1
@@ -476,7 +469,7 @@ metadata:
   name: mongodb-rs-1-svc-external
   namespace: eksrsoppoc1d
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-rs-1
 spec:
   type: NodePort
@@ -486,7 +479,7 @@ spec:
     targetPort: 10901
     nodePort: 30001
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-rs-1
 ---
 apiVersion: v1
@@ -495,7 +488,7 @@ metadata:
   name: mongodb-rs-2-svc-external
   namespace: eksrsoppoc1d
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-rs-2
 spec:
   type: NodePort
@@ -505,7 +498,7 @@ spec:
     targetPort: 10901
     nodePort: 30002
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-rs-2
 ```
 
@@ -769,7 +762,7 @@ kubectl --kubeconfig .kube/config run -it --rm debug \
 #### 3. View Operator Logs
 ```bash
 kubectl --kubeconfig .kube/config logs -n mongodb \
-  -l app.kubernetes.io/name=mongodb-enterprise-operator
+  -l app.kubernetes.io/name=mongodb-kubernetes-operator
 ```
 
 #### 4. View MongoDB Pod Logs
@@ -798,6 +791,6 @@ rm -rf .kube/ certs/
 
 ## References
 
-- [MongoDB Enterprise Kubernetes Operator Documentation](https://www.mongodb.com/docs/kubernetes-operator/stable/)
-- [External Connectivity Guide](https://www.mongodb.com/docs/kubernetes-operator/v1.33/tutorial/connect-from-outside-k8s/)
+- [MongoDB Controllers for Kubernetes (MCK) Documentation](https://www.mongodb.com/docs/kubernetes/current/)
+- [External Connectivity Guide](https://www.mongodb.com/docs/kubernetes/current/tutorial/connect-from-outside-k8s/)
 - [kind Documentation](https://kind.sigs.k8s.io/)

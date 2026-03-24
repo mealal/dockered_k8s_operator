@@ -109,37 +109,44 @@ DEFAULT_SINGLE_RS_NAME = "mongodb-rs"
 DEFAULT_MULTI_RS_NAME = "mongodb-multi-rs"
 
 # =============================================================================
-# Operator Configuration
+# Operator Configuration (MCK - MongoDB Controllers for Kubernetes)
 # =============================================================================
 
-# Operator version
-DEFAULT_OPERATOR_VERSION = "1.33.0"
+# MCK operator version (replaces MEKO 1.33.0)
+DEFAULT_OPERATOR_VERSION = "1.7.0"
 
-# Operator installation URLs (from MongoDB GitHub repository)
-OPERATOR_GITHUB_BASE = "https://raw.githubusercontent.com/mongodb/mongodb-enterprise-kubernetes"
-OPERATOR_CRDS_URL = f"{OPERATOR_GITHUB_BASE}/master/crds.yaml"
-OPERATOR_INSTALL_URL = f"{OPERATOR_GITHUB_BASE}/master/mongodb-enterprise.yaml"
-OPERATOR_MULTI_CLUSTER_URL = f"{OPERATOR_GITHUB_BASE}/master/mongodb-enterprise-multi-cluster.yaml"
+# Helm chart configuration
+HELM_REPO_NAME = "mongodb"
+HELM_REPO_URL = "https://mongodb.github.io/helm-charts"
+HELM_CHART_NAME = "mongodb/mongodb-kubernetes"
 
-# Operator deployment names
-OPERATOR_DEPLOYMENT_NAME = "mongodb-enterprise-operator"
-OPERATOR_MULTI_CLUSTER_DEPLOYMENT_NAME = "mongodb-enterprise-operator-multi-cluster"
+# Operator deployment names (MCK naming convention)
+OPERATOR_DEPLOYMENT_NAME = "mongodb-kubernetes-operator"
+OPERATOR_RELEASE_NAME = "mongodb-kubernetes-operator"
 
 # Operator labels
-OPERATOR_LABEL_SELECTOR = "app.kubernetes.io/name=mongodb-enterprise-operator"
+OPERATOR_LABEL_SELECTOR = "app.kubernetes.io/name=mongodb-kubernetes-operator"
+
+# Service account names (MCK naming convention)
+OPERATOR_SERVICE_ACCOUNT = "mongodb-kubernetes-operator"
+DATABASE_PODS_SERVICE_ACCOUNT = "mongodb-kubernetes-database-pods"
+APPDB_SERVICE_ACCOUNT = "mongodb-kubernetes-appdb"
+
+# Multi-cluster kubeconfig secret name (MCK default)
+MULTI_CLUSTER_KUBECONFIG_SECRET = "mongodb-kubernetes-operator-multi-cluster-kubeconfig"
 
 # =============================================================================
 # kubectl-mongodb Plugin Configuration
 # =============================================================================
 
-# Plugin version (without 'v' prefix for URLs)
-KUBECTL_MONGODB_PLUGIN_VERSION = "1.33.0"
+# Plugin version (from MCK releases)
+KUBECTL_MONGODB_PLUGIN_VERSION = "1.7.0"
 
 # Plugin download URLs by platform
 # Note: Windows is NOT officially supported by MongoDB - plugin not available
 KUBECTL_MONGODB_PLUGIN_URLS = {
-    "linux": f"https://github.com/mongodb/mongodb-enterprise-kubernetes/releases/download/{KUBECTL_MONGODB_PLUGIN_VERSION}/kubectl-mongodb_{KUBECTL_MONGODB_PLUGIN_VERSION}_linux_amd64.tar.gz",
-    "darwin": f"https://github.com/mongodb/mongodb-enterprise-kubernetes/releases/download/{KUBECTL_MONGODB_PLUGIN_VERSION}/kubectl-mongodb_{KUBECTL_MONGODB_PLUGIN_VERSION}_darwin_amd64.tar.gz",
+    "linux": f"https://github.com/mongodb/mongodb-kubernetes/releases/download/MCK-{KUBECTL_MONGODB_PLUGIN_VERSION}/kubectl-mongodb_{KUBECTL_MONGODB_PLUGIN_VERSION}_linux_amd64.tar.gz",
+    "darwin": f"https://github.com/mongodb/mongodb-kubernetes/releases/download/MCK-{KUBECTL_MONGODB_PLUGIN_VERSION}/kubectl-mongodb_{KUBECTL_MONGODB_PLUGIN_VERSION}_darwin_amd64.tar.gz",
 }
 
 # =============================================================================

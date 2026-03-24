@@ -1,5 +1,5 @@
 # =============================================================================
-# MongoDB Enterprise Operator RBAC for Replica Set Namespace
+# MCK Operator RBAC for Replica Set Namespace
 # =============================================================================
 #
 # This file defines the Role and RoleBinding that allow the MongoDB Enterprise
@@ -11,10 +11,10 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: mongodb-enterprise-operator
+  name: mongodb-kubernetes-operator
   namespace: eksrsoppoc1d
   labels:
-    app.kubernetes.io/name: mongodb-enterprise-operator
+    app.kubernetes.io/name: mongodb-kubernetes-operator
     app.kubernetes.io/component: rbac
     app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
 rules:
@@ -40,21 +40,21 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: mongodb-enterprise-operator
+  name: mongodb-kubernetes-operator
   namespace: eksrsoppoc1d
   labels:
-    app.kubernetes.io/name: mongodb-enterprise-operator
+    app.kubernetes.io/name: mongodb-kubernetes-operator
     app.kubernetes.io/component: rbac
     app.kubernetes.io/managed-by: deploy-mongodb-k8s-multi
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: mongodb-enterprise-operator
+  name: mongodb-kubernetes-operator
 subjects:
   # Support both standard and multi-cluster operator service accounts
   - kind: ServiceAccount
-    name: mongodb-enterprise-operator
+    name: mongodb-kubernetes-operator
     namespace: mongodb
   - kind: ServiceAccount
-    name: mongodb-enterprise-operator-multi-cluster
+    name: mongodb-kubernetes-operator-multi-cluster
     namespace: mongodb

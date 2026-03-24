@@ -213,7 +213,7 @@ Two architecture patterns are supported:
 | Networking | gRPC connectivity between `mongod` and `mongot` pods |
 | Ops Manager | Optional for `mongod` management: **Ops Manager 8.0.0+** required for Enterprise Server 8.0.x; **Ops Manager 8.0.13+** required for Enterprise Server 8.2 in production (earlier 8.0.x for preview only). Ops Manager manages `mongod` only — `mongot` is exclusively managed by the Kubernetes Operator |
 
-**Important**: The unified operator (MongoDB Controllers for Kubernetes v1.4+) is a **different project** from the MongoDB Enterprise Kubernetes Operator v1.33 used in many existing deployments. Migration may be required.
+**Note**: This project uses MCK (MongoDB Controllers for Kubernetes) v1.7.0, which is the successor to the deprecated MongoDB Enterprise Kubernetes Operator (MEKO). MCK uses Helm-based deployment.
 
 ### Pros
 
@@ -231,7 +231,7 @@ Two architecture patterns are supported:
 - **Paid Enterprise subscription required**
 - **Kubernetes infrastructure required** — significant operational overhead if not already running K8s
 - **High setup complexity** — operator installation, CRD management, RBAC, networking, storage classes
-- **Different operator from v1.33** — existing Enterprise Kubernetes Operator deployments must migrate to the unified operator
+- **Requires MCK v1.4+** — this project uses MCK v1.7.0 (Helm-based deployment)
 - **Linux-only** containers
 
 ### References
@@ -281,7 +281,7 @@ Docker images:
 - **Public Preview** — not production-ready
 - **Kubernetes infrastructure required** — significant overhead
 - **High setup complexity** — operator installation, CRDs, RBAC, storage
-- **Different operator from v1.33** — not compatible with existing MongoDB Enterprise Kubernetes Operator deployments
+- **Requires MCK v1.5+** — this project uses MCK v1.7.0 (Helm-based deployment)
 - **Linux-only** containers
 - **GA date not announced**
 

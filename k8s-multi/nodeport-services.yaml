@@ -31,7 +31,7 @@ metadata:
   name: mongodb-multi-rs-0-0-svc-external
   namespace: eksrsoppoc1d
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-0
 spec:
   type: NodePort
@@ -41,7 +41,7 @@ spec:
     targetPort: 10901
     nodePort: 30100
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-0
 
 ---
@@ -51,7 +51,7 @@ metadata:
   name: mongodb-multi-rs-0-1-svc-external
   namespace: eksrsoppoc1d
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-1
 spec:
   type: NodePort
@@ -61,7 +61,7 @@ spec:
     targetPort: 10901
     nodePort: 30101
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-1
 
 ---
@@ -71,7 +71,7 @@ metadata:
   name: mongodb-multi-rs-0-2-svc-external
   namespace: eksrsoppoc1d
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-2
 spec:
   type: NodePort
@@ -81,7 +81,7 @@ spec:
     targetPort: 10901
     nodePort: 30102
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-0-2
 
 # -----------------------------------------------------------------------------
@@ -95,7 +95,7 @@ metadata:
   name: mongodb-multi-rs-1-0-svc-external
   namespace: eksrsoppoc1d
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-0
 spec:
   type: NodePort
@@ -105,7 +105,7 @@ spec:
     targetPort: 10901
     nodePort: 30200
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-0
 
 ---
@@ -115,7 +115,7 @@ metadata:
   name: mongodb-multi-rs-1-1-svc-external
   namespace: eksrsoppoc1d
   labels:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-1
 spec:
   type: NodePort
@@ -125,5 +125,5 @@ spec:
     targetPort: 10901
     nodePort: 30201
   selector:
-    controller: mongodb-enterprise-operator
+    controller: mongodb-kubernetes-operator
     statefulset.kubernetes.io/pod-name: mongodb-multi-rs-1-1

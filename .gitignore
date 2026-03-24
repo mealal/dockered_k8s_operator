@@ -10,6 +10,9 @@ ops-manager-api-key.json
 # Generated certificates (contain private keys)
 certs/
 
+# Downloaded tool binaries (Helm, etc.)
+bin/
+
 # Kubernetes kubeconfig and kind binary (single-cluster)
 .kube/
 
